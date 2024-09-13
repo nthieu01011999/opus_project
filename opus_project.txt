@@ -1,0 +1,5402 @@
+#include <stdio.h>
+#include "opusenc.h"
+
+#define READ_SIZE 256
+
+int main(int argc, char **argv) {
+  FILE *fin;
+  OggOpusEnc *enc;
+  OggOpusComments *comments;
+  int error;
+  if (argc != 3) {
+    fprintf(stderr, "usage: %s <raw pcm input> <Ogg Opus output>\n", argv[0]);
+    return 1;
+  }
+  fin = fopen(argv[1], "rb");
+  if (!fin) {
+    fprintf(stderr, "cannot open input file: %s\n", argv[1]);
+    return 1;
+  }
+  comments = ope_comments_create();
+  ope_comments_add(comments, "ARTIST", "Someone");
+  ope_comments_add(comments, "TITLE", "Some track");
+  enc = ope_encoder_create_file(argv[2], comments, 44100, 2, 0, &error);
+  if (!enc) {
+    fprintf(stderr, "error encoding to file %s: %s\n", argv[2], ope_strerror(error));
+    ope_comments_destroy(comments);
+    fclose(fin);
+    return 1;
+  }
+  while (1) {
+    short buf[2*READ_SIZE];
+    int ret = fread(buf, 2*sizeof(short), READ_SIZE, fin);
+    if (ret > 0) {
+      ope_encoder_write(enc, buf, ret);
+    } else break;
+  }
+  ope_encoder_drain(enc);
+  ope_encoder_destroy(enc);
+  ope_comments_destroy(comments);
+  fclose(fin);
+  return 0;
+}
+/* Copyright (c) 2017 Jean-Marc Valin */
+/*
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef OPUSENC_H
+# define OPUSENC_H
+
+/**\mainpage
+   \section Introduction
+
+   This is the documentation for the <tt>libopusenc</tt> C API.
+
+   The <tt>libopusenc</tt> package provides a convenient high-level API for
+   encoding Ogg Opus files.
+
+   \section Organization
+
+   The main API is divided into several sections:
+   - \ref encoding
+   - \ref comments
+   - \ref encoder_ctl
+   - \ref callbacks
+   - \ref error_codes
+
+   \section Overview
+
+   The <tt>libopusfile</tt> API provides an easy way to encode Ogg Opus files using
+   <tt>libopus</tt>.
+*/
+
+# if defined(__cplusplus)
+extern "C" {
+# endif
+
+#include <stddef.h>
+#include <opus.h>
+
+#ifndef OPE_EXPORT
+# if defined(WIN32)
+#  if defined(OPE_BUILD) && defined(DLL_EXPORT)
+#   define OPE_EXPORT __declspec(dllexport)
+#  else
+#   define OPE_EXPORT
+#  endif
+# elif defined(__GNUC__) && defined(OPE_BUILD)
+#  define OPE_EXPORT __attribute__ ((visibility ("default")))
+# else
+#  define OPE_EXPORT
+# endif
+#endif
+
+/**\defgroup error_codes Error Codes*/
+/**@{*/
+/**\name List of possible error codes
+   Many of the functions in this library return a negative error code when a
+    function fails.
+   This list provides a brief explanation of the common errors.
+   See each individual function for more details on what a specific error code
+    means in that context.*/
+/**@{*/
+
+
+/* Bump this when we change the API. */
+/** API version for this header. Can be used to check for features at compile time. */
+#define OPE_API_VERSION 0
+
+#define OPE_OK 0
+/* Based on the relevant libopus code minus 10. */
+#define OPE_BAD_ARG -11
+#define OPE_INTERNAL_ERROR -13
+#define OPE_UNIMPLEMENTED -15
+#define OPE_ALLOC_FAIL -17
+
+/* Specific to libopusenc. */
+#define OPE_CANNOT_OPEN -30
+#define OPE_TOO_LATE -31
+#define OPE_INVALID_PICTURE -32
+#define OPE_INVALID_ICON -33
+#define OPE_WRITE_FAIL -34
+#define OPE_CLOSE_FAIL -35
+
+/**@}*/
+/**@}*/
+
+
+/* These are the "raw" request values -- they should usually not be used. */
+#define OPE_SET_DECISION_DELAY_REQUEST      14000
+#define OPE_GET_DECISION_DELAY_REQUEST      14001
+#define OPE_SET_MUXING_DELAY_REQUEST        14002
+#define OPE_GET_MUXING_DELAY_REQUEST        14003
+#define OPE_SET_COMMENT_PADDING_REQUEST     14004
+#define OPE_GET_COMMENT_PADDING_REQUEST     14005
+#define OPE_SET_SERIALNO_REQUEST            14006
+#define OPE_GET_SERIALNO_REQUEST            14007
+#define OPE_SET_PACKET_CALLBACK_REQUEST     14008
+/*#define OPE_GET_PACKET_CALLBACK_REQUEST     14009*/
+#define OPE_SET_HEADER_GAIN_REQUEST         14010
+#define OPE_GET_HEADER_GAIN_REQUEST         14011
+#define OPE_GET_NB_STREAMS_REQUEST          14013
+#define OPE_GET_NB_COUPLED_STREAMS_REQUEST  14015
+
+/**\defgroup encoder_ctl Encoding Options*/
+/**@{*/
+
+/**\name Control parameters
+
+   Macros for setting encoder options.*/
+/**@{*/
+
+#define OPE_SET_DECISION_DELAY(x) OPE_SET_DECISION_DELAY_REQUEST, __opus_check_int(x)
+#define OPE_GET_DECISION_DELAY(x) OPE_GET_DECISION_DELAY_REQUEST, __opus_check_int_ptr(x)
+#define OPE_SET_MUXING_DELAY(x) OPE_SET_MUXING_DELAY_REQUEST, __opus_check_int(x)
+#define OPE_GET_MUXING_DELAY(x) OPE_GET_MUXING_DELAY_REQUEST, __opus_check_int_ptr(x)
+#define OPE_SET_COMMENT_PADDING(x) OPE_SET_COMMENT_PADDING_REQUEST, __opus_check_int(x)
+#define OPE_GET_COMMENT_PADDING(x) OPE_GET_COMMENT_PADDING_REQUEST, __opus_check_int_ptr(x)
+#define OPE_SET_SERIALNO(x) OPE_SET_SERIALNO_REQUEST, __opus_check_int(x)
+#define OPE_GET_SERIALNO(x) OPE_GET_SERIALNO_REQUEST, __opus_check_int_ptr(x)
+/* FIXME: Add type-checking macros to these. */
+#define OPE_SET_PACKET_CALLBACK(x,u) OPE_SET_PACKET_CALLBACK_REQUEST, (x), (u)
+/*#define OPE_GET_PACKET_CALLBACK(x,u) OPE_GET_PACKET_CALLBACK_REQUEST, (x), (u)*/
+#define OPE_SET_HEADER_GAIN(x) OPE_SET_HEADER_GAIN_REQUEST, __opus_check_int(x)
+#define OPE_GET_HEADER_GAIN(x) OPE_GET_HEADER_GAIN_REQUEST, __opus_check_int_ptr(x)
+#define OPE_GET_NB_STREAMS(x) OPE_GET_NB_STREAMS_REQUEST, __opus_check_int_ptr(x)
+#define OPE_GET_NB_COUPLED_STREAMS(x) OPE_GET_NB_COUPLED_STREAMS_REQUEST, __opus_check_int_ptr(x)
+/**@}*/
+/**@}*/
+
+/**\defgroup callbacks Callback Functions */
+/**@{*/
+
+/**\name Callback functions
+
+   These are the callbacks that can be implemented for an encoder.*/
+/**@{*/
+
+/** Called for writing a page.
+ \param user_data user-defined data passed to the callback
+ \param ptr       buffer to be written
+ \param len       number of bytes to be written
+ \return          error code
+ \retval 0        success
+ \retval 1        failure
+ */
+typedef int (*ope_write_func)(void *user_data, const unsigned char *ptr, opus_int32 len);
+
+/** Called for closing a stream.
+ \param user_data user-defined data passed to the callback
+ \return          error code
+ \retval 0        success
+ \retval 1        failure
+ */
+typedef int (*ope_close_func)(void *user_data);
+
+/** Called on every packet encoded (including header).
+ \param user_data   user-defined data passed to the callback
+ \param packet_ptr  packet data
+ \param packet_len  number of bytes in the packet
+ \param flags       optional flags (none defined for now so zero)
+ */
+typedef void (*ope_packet_func)(void *user_data, const unsigned char *packet_ptr, opus_int32 packet_len, opus_uint32 flags);
+
+/** Callback functions for accessing the stream. */
+typedef struct {
+  /** Callback for writing to the stream. */
+  ope_write_func write;
+  /** Callback for closing the stream. */
+  ope_close_func close;
+} OpusEncCallbacks;
+/**@}*/
+/**@}*/
+
+/** Opaque comments struct. */
+typedef struct OggOpusComments OggOpusComments;
+
+/** Opaque encoder struct. */
+typedef struct OggOpusEnc OggOpusEnc;
+
+/**\defgroup comments Comments Handling */
+/**@{*/
+
+/**\name Functions for handling comments
+
+   These functions make it possible to add comments and pictures to Ogg Opus files.*/
+/**@{*/
+
+/** Create a new comments object.
+    \return Newly-created comments object. */
+OPE_EXPORT OggOpusComments *ope_comments_create(void);
+
+/** Create a deep copy of a comments object.
+    \param comments Comments object to copy
+    \return Deep copy of input. */
+OPE_EXPORT OggOpusComments *ope_comments_copy(OggOpusComments *comments);
+
+/** Destroys a comments object.
+    \param comments Comments object to destroy*/
+OPE_EXPORT void ope_comments_destroy(OggOpusComments *comments);
+
+/** Add a comment.
+    \param[in,out] comments Where to add the comments
+    \param         tag      Tag for the comment (must not contain = char)
+    \param         val      Value for the tag
+    \return Error code
+ */
+OPE_EXPORT int ope_comments_add(OggOpusComments *comments, const char *tag, const char *val);
+
+/** Add a comment as a single tag=value string.
+    \param[in,out] comments    Where to add the comments
+    \param         tag_and_val string of the form tag=value (must contain = char)
+    \return Error code
+ */
+OPE_EXPORT int ope_comments_add_string(OggOpusComments *comments, const char *tag_and_val);
+
+/** Add a picture from a file.
+    \param[in,out] comments     Where to add the comments
+    \param         filename     File name for the picture
+    \param         picture_type Type of picture (-1 for default)
+    \param         description  Description (NULL means no comment)
+    \return Error code
+ */
+OPE_EXPORT int ope_comments_add_picture(OggOpusComments *comments, const char *filename, int picture_type, const char *description);
+
+/** Add a picture already in memory.
+    \param[in,out] comments     Where to add the comments
+    \param         ptr          Pointer to picture in memory
+    \param         size         Size of picture pointed to by ptr
+    \param         picture_type Type of picture (-1 for default)
+    \param         description  Description (NULL means no comment)
+    \return Error code
+ */
+OPE_EXPORT int ope_comments_add_picture_from_memory(OggOpusComments *comments, const char *ptr, size_t size, int picture_type, const char *description);
+
+/**@}*/
+/**@}*/
+
+/**\defgroup encoding Encoding */
+/**@{*/
+
+/**\name Functions for encoding Ogg Opus files
+
+   These functions make it possible to encode Ogg Opus files.*/
+/**@{*/
+
+/** Create a new OggOpus file.
+    \param path       Path where to create the file
+    \param comments   Comments associated with the stream
+    \param rate       Input sampling rate (48 kHz is faster)
+    \param channels   Number of channels
+    \param family     Mapping family (0 for mono/stereo, 1 for surround)
+    \param[out] error Error code (NULL if no error is to be returned)
+    \return Newly-created encoder.
+    */
+OPE_EXPORT OggOpusEnc *ope_encoder_create_file(const char *path, OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error);
+
+/** Create a new OggOpus stream to be handled using callbacks
+    \param callbacks  Callback functions
+    \param user_data  Pointer to be associated with the stream and passed to the callbacks
+    \param comments   Comments associated with the stream
+    \param rate       Input sampling rate (48 kHz is faster)
+    \param channels   Number of channels
+    \param family     Mapping family (0 for mono/stereo, 1 for surround)
+    \param[out] error Error code (NULL if no error is to be returned)
+    \return Newly-created encoder.
+    */
+OPE_EXPORT OggOpusEnc *ope_encoder_create_callbacks(const OpusEncCallbacks *callbacks, void *user_data,
+    OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error);
+
+/** Create a new OggOpus stream to be used along with.ope_encoder_get_page().
+  This is mostly useful for muxing with other streams.
+    \param comments   Comments associated with the stream
+    \param rate       Input sampling rate (48 kHz is faster)
+    \param channels   Number of channels
+    \param family     Mapping family (0 for mono/stereo, 1 for surround)
+    \param[out] error Error code (NULL if no error is to be returned)
+    \return Newly-created encoder.
+    */
+OPE_EXPORT OggOpusEnc *ope_encoder_create_pull(OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error);
+
+/** Deferred initialization of the encoder to force an explicit channel mapping. This can be used to override the default channel coupling,
+    but using it for regular surround will almost certainly lead to worse quality.
+    \param[in,out] enc         Encoder
+    \param family              Mapping family (0 for mono/stereo, 1 for surround)
+    \param streams             Total number of streams
+    \param coupled_streams     Number of coupled streams
+    \param mapping             Channel mapping
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_deferred_init_with_mapping(OggOpusEnc *enc, int family, int streams,
+    int coupled_streams, const unsigned char *mapping);
+
+/** Add/encode any number of float samples to the stream.
+    \param[in,out] enc         Encoder
+    \param pcm                 Floating-point PCM values in the +/-1 range (interleaved if multiple channels)
+    \param samples_per_channel Number of samples for each channel
+    \return Error code*/
+OPE_EXPORT int ope_encoder_write_float(OggOpusEnc *enc, const float *pcm, int samples_per_channel);
+
+/** Add/encode any number of 16-bit linear samples to the stream.
+    \param[in,out] enc         Encoder
+    \param pcm                 Linear 16-bit PCM values in the [-32768,32767] range (interleaved if multiple channels)
+    \param samples_per_channel Number of samples for each channel
+    \return Error code*/
+OPE_EXPORT int ope_encoder_write(OggOpusEnc *enc, const opus_int16 *pcm, int samples_per_channel);
+
+/** Get the next page from the stream (only if using ope_encoder_create_pull()).
+    \param[in,out] enc Encoder
+    \param[out] page   Next available encoded page
+    \param[out] len    Size (in bytes) of the page returned
+    \param flush       If non-zero, forces a flush of the page (if any data avaiable)
+    \return 1 if there is a page available, 0 if not. */
+OPE_EXPORT int ope_encoder_get_page(OggOpusEnc *enc, unsigned char **page, opus_int32 *len, int flush);
+
+/** Finalizes the stream, but does not deallocate the object.
+    \param[in,out] enc Encoder
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_drain(OggOpusEnc *enc);
+
+/** Deallocates the obect. Make sure to ope_drain() first.
+    \param[in,out] enc Encoder
+ */
+OPE_EXPORT void ope_encoder_destroy(OggOpusEnc *enc);
+
+/** Ends the stream and create a new stream within the same file.
+    \param[in,out] enc Encoder
+    \param comments   Comments associated with the stream
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_chain_current(OggOpusEnc *enc, OggOpusComments *comments);
+
+/** Ends the stream and create a new file.
+    \param[in,out] enc Encoder
+    \param path        Path where to write the new file
+    \param comments    Comments associated with the stream
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_continue_new_file(OggOpusEnc *enc, const char *path, OggOpusComments *comments);
+
+/** Ends the stream and create a new file (callback-based).
+    \param[in,out] enc Encoder
+    \param user_data   Pointer to be associated with the new stream and passed to the callbacks
+    \param comments    Comments associated with the stream
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_continue_new_callbacks(OggOpusEnc *enc, void *user_data, OggOpusComments *comments);
+
+/** Write out the header now rather than wait for audio to begin.
+    \param[in,out] enc Encoder
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_flush_header(OggOpusEnc *enc);
+
+/** Sets encoder options.
+    \param[in,out] enc Encoder
+    \param request     Use a request macro
+    \return Error code
+ */
+OPE_EXPORT int ope_encoder_ctl(OggOpusEnc *enc, int request, ...);
+
+/** Converts a libopusenc error code into a human readable string.
+  *
+  * @param error Error number
+  * @returns Error string
+  */
+OPE_EXPORT const char *ope_strerror(int error);
+
+/** Returns a string representing the version of libopusenc being used at run time.
+    \return A string describing the version of this library */
+OPE_EXPORT const char *ope_get_version_string(void);
+
+/** ABI version for this header. Can be used to check for features at run time.
+    \return An integer representing the ABI version */
+OPE_EXPORT int ope_get_abi_version(void);
+
+/**@}*/
+/**@}*/
+
+# if defined(__cplusplus)
+}
+# endif
+
+#endif
+/* Copyright (C) 2003 Jean-Marc Valin */
+/**
+   @file arch.h
+   @brief Various architecture definitions Speex
+*/
+/*
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   - Neither the name of the Xiph.org Foundation nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef ARCH_H
+#define ARCH_H
+
+/* A couple test to catch stupid option combinations */
+#ifdef FIXED_POINT
+
+#if ((defined (ARM4_ASM)||defined (ARM4_ASM)) && defined(BFIN_ASM)) || (defined (ARM4_ASM)&&defined(ARM5E_ASM))
+#error Make up your mind. What CPU do you have?
+#endif
+
+#else
+
+#if defined (ARM4_ASM) || defined(ARM5E_ASM) || defined(BFIN_ASM)
+#error I suppose you can have a [ARM4/ARM5E/Blackfin] that has float instructions?
+#endif
+
+#endif
+
+#ifndef OUTSIDE_SPEEX
+#include "speex/speexdsp_types.h"
+#endif
+
+#define ABS(x) ((x) < 0 ? (-(x)) : (x))      /**< Absolute integer value. */
+#define ABS16(x) ((x) < 0 ? (-(x)) : (x))    /**< Absolute 16-bit value.  */
+#define MIN16(a,b) ((a) < (b) ? (a) : (b))   /**< Maximum 16-bit value.   */
+#define MAX16(a,b) ((a) > (b) ? (a) : (b))   /**< Maximum 16-bit value.   */
+#define ABS32(x) ((x) < 0 ? (-(x)) : (x))    /**< Absolute 32-bit value.  */
+#define MIN32(a,b) ((a) < (b) ? (a) : (b))   /**< Maximum 32-bit value.   */
+#define MAX32(a,b) ((a) > (b) ? (a) : (b))   /**< Maximum 32-bit value.   */
+
+#ifdef FIXED_POINT
+
+typedef spx_int16_t spx_word16_t;
+typedef spx_int32_t spx_word32_t;
+typedef spx_word32_t spx_mem_t;
+typedef spx_word16_t spx_coef_t;
+typedef spx_word16_t spx_lsp_t;
+typedef spx_word32_t spx_sig_t;
+
+#define Q15ONE 32767
+
+#define LPC_SCALING  8192
+#define SIG_SCALING  16384
+#define LSP_SCALING  8192.
+#define GAMMA_SCALING 32768.
+#define GAIN_SCALING 64
+#define GAIN_SCALING_1 0.015625
+
+#define LPC_SHIFT    13
+#define LSP_SHIFT    13
+#define SIG_SHIFT    14
+#define GAIN_SHIFT   6
+
+#define WORD2INT(x) ((x) < -32767 ? -32768 : ((x) > 32766 ? 32767 : (x)))
+
+#define VERY_SMALL 0
+#define VERY_LARGE32 ((spx_word32_t)2147483647)
+#define VERY_LARGE16 ((spx_word16_t)32767)
+#define Q15_ONE ((spx_word16_t)32767)
+
+
+#ifdef FIXED_DEBUG
+#include "fixed_debug.h"
+#else
+
+#include "fixed_generic.h"
+
+#ifdef ARM5E_ASM
+#include "fixed_arm5e.h"
+#elif defined (ARM4_ASM)
+#include "fixed_arm4.h"
+#elif defined (BFIN_ASM)
+#include "fixed_bfin.h"
+#endif
+
+#endif
+
+
+#else
+
+typedef float spx_mem_t;
+typedef float spx_coef_t;
+typedef float spx_lsp_t;
+typedef float spx_sig_t;
+typedef float spx_word16_t;
+typedef float spx_word32_t;
+
+#define Q15ONE 1.0f
+#define LPC_SCALING  1.f
+#define SIG_SCALING  1.f
+#define LSP_SCALING  1.f
+#define GAMMA_SCALING 1.f
+#define GAIN_SCALING 1.f
+#define GAIN_SCALING_1 1.f
+
+
+#define VERY_SMALL 1e-15f
+#define VERY_LARGE32 1e15f
+#define VERY_LARGE16 1e15f
+#define Q15_ONE ((spx_word16_t)1.f)
+
+#define QCONST16(x,bits) (x)
+#define QCONST32(x,bits) (x)
+
+#define NEG16(x) (-(x))
+#define NEG32(x) (-(x))
+#define EXTRACT16(x) (x)
+#define EXTEND32(x) (x)
+#define SHR16(a,shift) (a)
+#define SHL16(a,shift) (a)
+#define SHR32(a,shift) (a)
+#define SHL32(a,shift) (a)
+#define PSHR16(a,shift) (a)
+#define PSHR32(a,shift) (a)
+#define VSHR32(a,shift) (a)
+#define SATURATE16(x,a) (x)
+#define SATURATE32(x,a) (x)
+#define SATURATE32PSHR(x,shift,a) (x)
+
+#define PSHR(a,shift)       (a)
+#define SHR(a,shift)       (a)
+#define SHL(a,shift)       (a)
+#define SATURATE(x,a) (x)
+
+#define ADD16(a,b) ((a)+(b))
+#define SUB16(a,b) ((a)-(b))
+#define ADD32(a,b) ((a)+(b))
+#define SUB32(a,b) ((a)-(b))
+#define MULT16_16_16(a,b)     ((a)*(b))
+#define MULT16_16(a,b)     ((spx_word32_t)(a)*(spx_word32_t)(b))
+#define MAC16_16(c,a,b)     ((c)+(spx_word32_t)(a)*(spx_word32_t)(b))
+
+#define MULT16_32_Q11(a,b)     ((a)*(b))
+#define MULT16_32_Q13(a,b)     ((a)*(b))
+#define MULT16_32_Q14(a,b)     ((a)*(b))
+#define MULT16_32_Q15(a,b)     ((a)*(b))
+#define MULT16_32_P15(a,b)     ((a)*(b))
+
+#define MAC16_32_Q11(c,a,b)     ((c)+(a)*(b))
+#define MAC16_32_Q15(c,a,b)     ((c)+(a)*(b))
+
+#define MAC16_16_Q11(c,a,b)     ((c)+(a)*(b))
+#define MAC16_16_Q13(c,a,b)     ((c)+(a)*(b))
+#define MAC16_16_P13(c,a,b)     ((c)+(a)*(b))
+#define MULT16_16_Q11_32(a,b)     ((a)*(b))
+#define MULT16_16_Q13(a,b)     ((a)*(b))
+#define MULT16_16_Q14(a,b)     ((a)*(b))
+#define MULT16_16_Q15(a,b)     ((a)*(b))
+#define MULT16_16_P15(a,b)     ((a)*(b))
+#define MULT16_16_P13(a,b)     ((a)*(b))
+#define MULT16_16_P14(a,b)     ((a)*(b))
+
+#define DIV32_16(a,b)     (((spx_word32_t)(a))/(spx_word16_t)(b))
+#define PDIV32_16(a,b)     (((spx_word32_t)(a))/(spx_word16_t)(b))
+#define DIV32(a,b)     (((spx_word32_t)(a))/(spx_word32_t)(b))
+#define PDIV32(a,b)     (((spx_word32_t)(a))/(spx_word32_t)(b))
+
+#define WORD2INT(x) ((x) < -32767.5f ? -32768 : \
+                    ((x) > 32766.5f ? 32767 : (spx_int16_t)floor(.5 + (x))))
+#endif
+
+
+#if defined (CONFIG_TI_C54X) || defined (CONFIG_TI_C55X)
+
+/* 2 on TI C5x DSP */
+#define BYTES_PER_CHAR 2
+#define BITS_PER_CHAR 16
+#define LOG2_BITS_PER_CHAR 4
+
+#else
+
+#define BYTES_PER_CHAR 1
+#define BITS_PER_CHAR 8
+#define LOG2_BITS_PER_CHAR 3
+
+#endif
+
+
+
+#ifdef FIXED_DEBUG
+extern long long spx_mips;
+#endif
+
+
+#endif
+/* Copyright (c) 2017 Jean-Marc Valin
+   Copyright (c) 1994-2010 Xiph.Org Foundation */
+/*
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+
+#include <stdio.h>
+#include "ogg_packer.h"
+
+#define MAX_HEADER_SIZE (27+255)
+
+#define MAX_PAGE_SIZE (255*255 + MAX_HEADER_SIZE)
+
+static const oggp_uint32 crc_lookup[256]={
+  0x00000000,0x04c11db7,0x09823b6e,0x0d4326d9,
+  0x130476dc,0x17c56b6b,0x1a864db2,0x1e475005,
+  0x2608edb8,0x22c9f00f,0x2f8ad6d6,0x2b4bcb61,
+  0x350c9b64,0x31cd86d3,0x3c8ea00a,0x384fbdbd,
+  0x4c11db70,0x48d0c6c7,0x4593e01e,0x4152fda9,
+  0x5f15adac,0x5bd4b01b,0x569796c2,0x52568b75,
+  0x6a1936c8,0x6ed82b7f,0x639b0da6,0x675a1011,
+  0x791d4014,0x7ddc5da3,0x709f7b7a,0x745e66cd,
+  0x9823b6e0,0x9ce2ab57,0x91a18d8e,0x95609039,
+  0x8b27c03c,0x8fe6dd8b,0x82a5fb52,0x8664e6e5,
+  0xbe2b5b58,0xbaea46ef,0xb7a96036,0xb3687d81,
+  0xad2f2d84,0xa9ee3033,0xa4ad16ea,0xa06c0b5d,
+  0xd4326d90,0xd0f37027,0xddb056fe,0xd9714b49,
+  0xc7361b4c,0xc3f706fb,0xceb42022,0xca753d95,
+  0xf23a8028,0xf6fb9d9f,0xfbb8bb46,0xff79a6f1,
+  0xe13ef6f4,0xe5ffeb43,0xe8bccd9a,0xec7dd02d,
+  0x34867077,0x30476dc0,0x3d044b19,0x39c556ae,
+  0x278206ab,0x23431b1c,0x2e003dc5,0x2ac12072,
+  0x128e9dcf,0x164f8078,0x1b0ca6a1,0x1fcdbb16,
+  0x018aeb13,0x054bf6a4,0x0808d07d,0x0cc9cdca,
+  0x7897ab07,0x7c56b6b0,0x71159069,0x75d48dde,
+  0x6b93dddb,0x6f52c06c,0x6211e6b5,0x66d0fb02,
+  0x5e9f46bf,0x5a5e5b08,0x571d7dd1,0x53dc6066,
+  0x4d9b3063,0x495a2dd4,0x44190b0d,0x40d816ba,
+  0xaca5c697,0xa864db20,0xa527fdf9,0xa1e6e04e,
+  0xbfa1b04b,0xbb60adfc,0xb6238b25,0xb2e29692,
+  0x8aad2b2f,0x8e6c3698,0x832f1041,0x87ee0df6,
+  0x99a95df3,0x9d684044,0x902b669d,0x94ea7b2a,
+  0xe0b41de7,0xe4750050,0xe9362689,0xedf73b3e,
+  0xf3b06b3b,0xf771768c,0xfa325055,0xfef34de2,
+  0xc6bcf05f,0xc27dede8,0xcf3ecb31,0xcbffd686,
+  0xd5b88683,0xd1799b34,0xdc3abded,0xd8fba05a,
+  0x690ce0ee,0x6dcdfd59,0x608edb80,0x644fc637,
+  0x7a089632,0x7ec98b85,0x738aad5c,0x774bb0eb,
+  0x4f040d56,0x4bc510e1,0x46863638,0x42472b8f,
+  0x5c007b8a,0x58c1663d,0x558240e4,0x51435d53,
+  0x251d3b9e,0x21dc2629,0x2c9f00f0,0x285e1d47,
+  0x36194d42,0x32d850f5,0x3f9b762c,0x3b5a6b9b,
+  0x0315d626,0x07d4cb91,0x0a97ed48,0x0e56f0ff,
+  0x1011a0fa,0x14d0bd4d,0x19939b94,0x1d528623,
+  0xf12f560e,0xf5ee4bb9,0xf8ad6d60,0xfc6c70d7,
+  0xe22b20d2,0xe6ea3d65,0xeba91bbc,0xef68060b,
+  0xd727bbb6,0xd3e6a601,0xdea580d8,0xda649d6f,
+  0xc423cd6a,0xc0e2d0dd,0xcda1f604,0xc960ebb3,
+  0xbd3e8d7e,0xb9ff90c9,0xb4bcb610,0xb07daba7,
+  0xae3afba2,0xaafbe615,0xa7b8c0cc,0xa379dd7b,
+  0x9b3660c6,0x9ff77d71,0x92b45ba8,0x9675461f,
+  0x8832161a,0x8cf30bad,0x81b02d74,0x857130c3,
+  0x5d8a9099,0x594b8d2e,0x5408abf7,0x50c9b640,
+  0x4e8ee645,0x4a4ffbf2,0x470cdd2b,0x43cdc09c,
+  0x7b827d21,0x7f436096,0x7200464f,0x76c15bf8,
+  0x68860bfd,0x6c47164a,0x61043093,0x65c52d24,
+  0x119b4be9,0x155a565e,0x18197087,0x1cd86d30,
+  0x029f3d35,0x065e2082,0x0b1d065b,0x0fdc1bec,
+  0x3793a651,0x3352bbe6,0x3e119d3f,0x3ad08088,
+  0x2497d08d,0x2056cd3a,0x2d15ebe3,0x29d4f654,
+  0xc5a92679,0xc1683bce,0xcc2b1d17,0xc8ea00a0,
+  0xd6ad50a5,0xd26c4d12,0xdf2f6bcb,0xdbee767c,
+  0xe3a1cbc1,0xe760d676,0xea23f0af,0xeee2ed18,
+  0xf0a5bd1d,0xf464a0aa,0xf9278673,0xfde69bc4,
+  0x89b8fd09,0x8d79e0be,0x803ac667,0x84fbdbd0,
+  0x9abc8bd5,0x9e7d9662,0x933eb0bb,0x97ffad0c,
+  0xafb010b1,0xab710d06,0xa6322bdf,0xa2f33668,
+  0xbcb4666d,0xb8757bda,0xb5365d03,0xb1f740b4};
+
+static void ogg_page_checksum_set(unsigned char *page, oggp_int32 len){
+  oggp_uint32 crc_reg=0;
+  oggp_int32 i;
+
+  /* safety; needed for API behavior, but not framing code */
+  page[22]=0;
+  page[23]=0;
+  page[24]=0;
+  page[25]=0;
+
+  for(i=0;i<len;i++) crc_reg=(crc_reg<<8)^crc_lookup[((crc_reg >> 24)&0xff)^page[i]];
+
+  page[22]=(unsigned char)(crc_reg&0xff);
+  page[23]=(unsigned char)((crc_reg>>8)&0xff);
+  page[24]=(unsigned char)((crc_reg>>16)&0xff);
+  page[25]=(unsigned char)((crc_reg>>24)&0xff);
+}
+
+typedef struct {
+  oggp_uint64 granulepos;
+  size_t buf_pos;
+  size_t buf_size;
+  size_t lacing_pos;
+  size_t lacing_size;
+  int flags;
+  size_t pageno;
+} oggp_page;
+
+struct oggpacker {
+  oggp_int32 serialno;
+  unsigned char *buf;
+  unsigned char *alloc_buf;
+  unsigned char *user_buf;
+  size_t buf_size;
+  size_t buf_fill;
+  size_t buf_begin;
+  unsigned char *lacing;
+  size_t lacing_size;
+  size_t lacing_fill;
+  size_t lacing_begin;
+  oggp_page *pages;
+  size_t pages_size;
+  size_t pages_fill;
+  oggp_uint64 muxing_delay;
+  int is_eos;
+  oggp_uint64 curr_granule;
+  oggp_uint64 last_granule;
+  size_t pageno;
+};
+
+/** Allocates an oggpacker object */
+oggpacker *oggp_create(oggp_int32 serialno) {
+  oggpacker *oggp;
+  oggp = malloc(sizeof(*oggp));
+  if (oggp == NULL) goto fail;
+  oggp->alloc_buf = NULL;
+  oggp->lacing = NULL;
+  oggp->pages = NULL;
+  oggp->user_buf = NULL;
+
+  oggp->buf_size = MAX_PAGE_SIZE;
+  oggp->lacing_size = 256;
+  oggp->pages_size = 10;
+
+  oggp->alloc_buf = malloc(oggp->buf_size + MAX_HEADER_SIZE);
+  oggp->lacing = malloc(oggp->lacing_size);
+  oggp->pages = malloc(oggp->pages_size * sizeof(oggp->pages[0]));
+  if (!oggp->alloc_buf || !oggp->lacing || !oggp->pages) goto fail;
+  oggp->buf = oggp->alloc_buf + MAX_HEADER_SIZE;
+
+  oggp->serialno = serialno;
+  oggp->buf_fill = 0;
+  oggp->buf_begin = 0;
+  oggp->lacing_fill = 0;
+  oggp->lacing_begin = 0;
+  oggp->pages_fill = 0;
+
+  oggp->is_eos = 0;
+  oggp->curr_granule = 0;
+  oggp->last_granule = 0;
+  oggp->pageno = 0;
+  oggp->muxing_delay = 0;
+  return oggp;
+fail:
+  if (oggp) {
+    if (oggp->lacing) free(oggp->lacing);
+    if (oggp->alloc_buf) free(oggp->alloc_buf);
+    if (oggp->pages) free(oggp->pages);
+    free(oggp);
+  }
+  return NULL;
+}
+
+/** Frees memory associated with an oggpacker object */
+void oggp_destroy(oggpacker *oggp) {
+  free(oggp->lacing);
+  free(oggp->alloc_buf);
+  free(oggp->pages);
+  free(oggp);
+}
+
+/** Sets the maximum muxing delay in granulepos units. Pages will be auto-flushed
+    to enforce the delay and to avoid continued pages if possible. */
+void oggp_set_muxing_delay(oggpacker *oggp, oggp_uint64 delay) {
+  oggp->muxing_delay = delay;
+}
+
+static void shift_buffer(oggpacker *oggp) {
+  size_t buf_shift;
+  size_t lacing_shift;
+  size_t i;
+  buf_shift = oggp->pages_fill ? oggp->pages[0].buf_pos : oggp->buf_begin;
+  lacing_shift = oggp->pages_fill ? oggp->pages[0].lacing_pos : oggp->lacing_begin;
+  if (4*lacing_shift > oggp->lacing_fill) {
+    memmove(&oggp->lacing[0], &oggp->lacing[lacing_shift], oggp->lacing_fill-lacing_shift);
+    for (i=0;i<oggp->pages_fill;i++) oggp->pages[i].lacing_pos -= lacing_shift;
+    oggp->lacing_fill -= lacing_shift;
+    oggp->lacing_begin -= lacing_shift;
+  }
+  if (4*buf_shift > oggp->buf_fill) {
+    memmove(&oggp->buf[0], &oggp->buf[buf_shift], oggp->buf_fill-buf_shift);
+    for (i=0;i<oggp->pages_fill;i++) oggp->pages[i].buf_pos -= buf_shift;
+    oggp->buf_fill -= buf_shift;
+    oggp->buf_begin -= buf_shift;
+  }
+}
+
+/** Get a buffer where to write the next packet. The buffer will have
+    size "bytes", but fewer bytes can be written. The buffer remains valid through
+    a call to oggp_close_page() or oggp_get_next_page(), but is invalidated by
+    another call to oggp_get_packet_buffer() or by a call to oggp_commit_packet(). */
+unsigned char *oggp_get_packet_buffer(oggpacker *oggp, oggp_int32 bytes) {
+  if (oggp->buf_fill + bytes > oggp->buf_size) {
+    shift_buffer(oggp);
+
+    /* If we didn't shift the buffer or if we did and there's still not enough room, make some more. */
+    if (oggp->buf_fill + bytes > oggp->buf_size) {
+      size_t newsize;
+      unsigned char *newbuf;
+      newsize = oggp->buf_fill + bytes + MAX_HEADER_SIZE;
+      /* Making sure we don't need to do that too often. */
+      newsize = newsize*3/2;
+      newbuf = realloc(oggp->alloc_buf, newsize);
+      if (newbuf != NULL) {
+        oggp->alloc_buf = newbuf;
+        oggp->buf_size = newsize;
+        oggp->buf = oggp->alloc_buf + MAX_HEADER_SIZE;
+      } else {
+        return NULL;
+      }
+    }
+  }
+  oggp->user_buf = &oggp->buf[oggp->buf_fill];
+  return oggp->user_buf;
+}
+
+/** Tells the oggpacker that the packet buffer obtained from
+    oggp_get_packet_buffer() has been filled and the number of bytes written
+    has to be no more than what was originally asked for. */
+int oggp_commit_packet(oggpacker *oggp, oggp_int32 bytes, oggp_uint64 granulepos, int eos) {
+  size_t i;
+  size_t nb_255s;
+  assert(oggp->user_buf != NULL);
+  nb_255s = bytes/255;
+  if (oggp->lacing_fill-oggp->lacing_begin+nb_255s+1 > 255 ||
+      (oggp->muxing_delay && granulepos - oggp->last_granule > oggp->muxing_delay)) {
+    oggp_flush_page(oggp);
+  }
+  assert(oggp->user_buf >= &oggp->buf[oggp->buf_fill]);
+  oggp->buf_fill += bytes;
+  if (oggp->lacing_fill + nb_255s + 1 > oggp->lacing_size) {
+    shift_buffer(oggp);
+
+    /* If we didn't shift the values or if we did and there's still not enough room, make some more. */
+    if (oggp->lacing_fill + nb_255s + 1 > oggp->lacing_size) {
+      size_t newsize;
+      unsigned char *newbuf;
+      newsize = oggp->lacing_fill + nb_255s + 1;
+      /* Making sure we don't need to do that too often. */
+      newsize = newsize*3/2;
+      newbuf = realloc(oggp->lacing, newsize);
+      if (newbuf != NULL) {
+        oggp->lacing = newbuf;
+        oggp->lacing_size = newsize;
+      } else {
+        return 1;
+      }
+    }
+  }
+  /* If we moved the buffer data, update the incoming packet location. */
+  if (oggp->user_buf > &oggp->buf[oggp->buf_fill]) {
+    memmove(&oggp->buf[oggp->buf_fill], oggp->user_buf, bytes);
+  }
+  for (i=0;i<nb_255s;i++) {
+    oggp->lacing[oggp->lacing_fill+i] = 255;
+  }
+  oggp->lacing[oggp->lacing_fill+nb_255s] = bytes - 255*nb_255s;
+  oggp->lacing_fill += nb_255s + 1;
+  oggp->curr_granule = granulepos;
+  oggp->is_eos = eos;
+  if (oggp->muxing_delay && granulepos - oggp->last_granule >= oggp->muxing_delay) {
+    oggp_flush_page(oggp);
+  }
+  return 0;
+}
+
+/** Create a page from the data written so far (and not yet part of a previous page).
+    If there is too much data for one page, all page continuations will be closed too. */
+int oggp_flush_page(oggpacker *oggp) {
+  oggp_page *p;
+  int cont = 0;
+  size_t nb_lacing;
+  if (oggp->lacing_fill == oggp->lacing_begin) {
+    return 1;
+  }
+  nb_lacing = oggp->lacing_fill - oggp->lacing_begin;
+  do {
+    if (oggp->pages_fill >= oggp->pages_size) {
+      size_t newsize;
+      oggp_page *newbuf;
+      /* Making sure we don't need to do that too often. */
+      newsize = 1 + oggp->pages_size*3/2;
+      newbuf = realloc(oggp->pages, newsize*sizeof(oggp_page));
+      assert(newbuf != NULL);
+      oggp->pages = newbuf;
+      oggp->pages_size = newsize;
+    }
+    p = &oggp->pages[oggp->pages_fill++];
+    p->granulepos = oggp->curr_granule;
+
+    p->lacing_pos = oggp->lacing_begin;
+    p->lacing_size = nb_lacing;
+    p->flags = cont;
+    p->buf_pos = oggp->buf_begin;
+    if (p->lacing_size > 255) {
+      size_t bytes=0;
+      int i;
+      for (i=0;i<255;i++) bytes += oggp->lacing[oggp->lacing_begin+1];
+      p->buf_size = bytes;
+      p->lacing_size = 255;
+      p->granulepos = -1;
+      cont = 1;
+    } else {
+      p->buf_size = oggp->buf_fill - oggp->buf_begin;
+      if (oggp->is_eos) p->flags |= 0x04;
+    }
+    nb_lacing -= p->lacing_size;
+    oggp->lacing_begin += p->lacing_size;
+    oggp->buf_begin += p->buf_size;
+    p->pageno = oggp->pageno++;
+    if (p->pageno == 0)
+      p->flags |= 0x02;
+  } while (nb_lacing>0);
+
+  oggp->last_granule = oggp->curr_granule;
+  return 0;
+}
+
+/** Get a pointer to the contents of the next available page. Pointer is
+    invalidated on the next call to oggp_get_next_page() or oggp_commit_packet(). */
+int oggp_get_next_page(oggpacker *oggp, unsigned char **page, oggp_int32 *bytes) {
+  oggp_page *p;
+  int i;
+  unsigned char *ptr;
+  size_t len;
+  int header_size;
+  oggp_uint64 granule_pos;
+  if (oggp->pages_fill == 0) {
+    *page = NULL;
+    *bytes = 0;
+    return 0;
+  }
+  p = &oggp->pages[0];
+  header_size = 27 + p->lacing_size;
+  /* Don't use indexing in case header_size > p->buf_pos. */
+  ptr = oggp->buf + p->buf_pos - header_size;
+  len = p->buf_size + header_size;
+  memcpy(&ptr[27], &oggp->lacing[p->lacing_pos], p->lacing_size);
+  memcpy(ptr, "OggS", 4);
+
+  /* stream structure version */
+  ptr[4]=0x00;
+
+  ptr[5]=0x00 | p->flags;
+
+  granule_pos = p->granulepos;
+  /* 64 bits of PCM position */
+  for(i=6;i<14;i++){
+    ptr[i]=(unsigned char)(granule_pos&0xff);
+    granule_pos>>=8;
+  }
+
+  /* 32 bits of stream serial number */
+  {
+    oggp_int32 serialno=oggp->serialno;
+    for(i=14;i<18;i++){
+      ptr[i]=(unsigned char)(serialno&0xff);
+      serialno>>=8;
+    }
+  }
+
+  {
+    oggp_int32 pageno=p->pageno;
+    for(i=18;i<22;i++){
+      ptr[i]=(unsigned char)(pageno&0xff);
+      pageno>>=8;
+    }
+  }
+
+  ptr[26] = p->lacing_size;
+
+  /* CRC is always last. */
+  ogg_page_checksum_set(ptr, len);
+
+  *page = ptr;
+  *bytes = len;
+  oggp->pages_fill--;
+  memmove(&oggp->pages[0], &oggp->pages[1], oggp->pages_fill*sizeof(oggp_page));
+  return 1;
+}
+
+/** Creates a new (chained) stream. This closes all outstanding pages. These
+    pages remain available with oggp_get_next_page(). */
+int oggp_chain(oggpacker *oggp, oggp_int32 serialno) {
+  oggp_flush_page(oggp);
+  oggp->serialno = serialno;
+  oggp->curr_granule = 0;
+  oggp->last_granule = 0;
+  oggp->is_eos = 0;
+  oggp->pageno = 0;
+  return 0;
+}
+/* Copyright (c) 2017 Jean-Marc Valin */
+/*
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef OGGPACKER_H
+# define OGGPACKER_H
+
+
+# if defined(__cplusplus)
+extern "C" {
+# endif
+
+typedef unsigned long long oggp_uint64;
+typedef unsigned oggp_uint32;
+typedef int oggp_int32;
+
+typedef struct oggpacker oggpacker;
+
+/** Allocates an oggpacker object */
+oggpacker *oggp_create(oggp_int32 serialno);
+
+/** Frees memory associated with an oggpacker object */
+void oggp_destroy(oggpacker *oggp);
+
+/** Sets the maximum muxing delay in granulepos units. Pages will be auto-flushed
+    to enforce the delay and to avoid continued pages if possible. */
+void oggp_set_muxing_delay(oggpacker *oggp, oggp_uint64 delay);
+
+/** Get a buffer where to write the next packet. The buffer will have
+    size "bytes", but fewer bytes can be written. The buffer remains valid through
+    a call to oggp_close_page() or oggp_get_next_page(), but is invalidated by
+    another call to oggp_get_packet_buffer() or by a call to oggp_commit_packet(). */
+unsigned char *oggp_get_packet_buffer(oggpacker *oggp, oggp_int32 bytes);
+
+/** Tells the oggpacker that the packet buffer obtained from
+    oggp_get_packet_buffer() has been filled and the number of bytes written
+    has to be no more than what was originally asked for. */
+int oggp_commit_packet(oggpacker *oggp, oggp_int32 bytes, oggp_uint64 granulepos, int eos);
+
+/** Create a page from the data written so far (and not yet part of a previous page).
+    If there is too much data for one page, then all page continuations will be closed too. */
+int oggp_flush_page(oggpacker *oggp);
+
+/** Get a pointer to the contents of the next available page. Pointer is
+    invalidated on the next call to oggp_get_next_page() or oggp_commit_packet(). */
+int oggp_get_next_page(oggpacker *oggp, unsigned char **page, oggp_int32 *bytes);
+
+/** Creates a new (chained) stream. This closes all outstanding pages. These
+    pages remain available with oggp_get_next_page(). */
+int oggp_chain(oggpacker *oggp, oggp_int32 serialno);
+
+# if defined(__cplusplus)
+}
+# endif
+
+#endif
+/* Copyright (C)2012 Xiph.Org Foundation
+   File: opus_header.c
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifdef HAVE_CONFIG_H
+# include "config.h"
+#endif
+
+#include "opus_header.h"
+#include <string.h>
+#include <stdio.h>
+
+/* Header contents:
+  - "OpusHead" (64 bits)
+  - version number (8 bits)
+  - Channels C (8 bits)
+  - Pre-skip (16 bits)
+  - Sampling rate (32 bits)
+  - Gain in dB (16 bits, S7.8)
+  - Mapping (8 bits, 0=single stream (mono/stereo) 1=Vorbis mapping,
+             2=ambisonics, 3=projection ambisonics, 4..239: reserved,
+             240..254: experiments, 255: multistream with no mapping)
+
+  - if (mapping != 0)
+     - N = total number of streams (8 bits)
+     - M = number of paired streams (8 bits)
+     - if (mapping != a projection family)
+       - C times channel origin
+          - if (C<2*M)
+             - stream = byte/2
+             - if (byte&0x1 == 0)
+                 - left
+               else
+                 - right
+          - else
+             - stream = byte-M
+    - else
+       - D demixing matrix (C*(N+M)*16 bits)
+*/
+
+typedef struct {
+   unsigned char *data;
+   int maxlen;
+   int pos;
+} Packet;
+
+static int write_uint32(Packet *p, opus_uint32 val)
+{
+   if (p->pos>p->maxlen-4)
+      return 0;
+   p->data[p->pos  ] = (val    ) & 0xFF;
+   p->data[p->pos+1] = (val>> 8) & 0xFF;
+   p->data[p->pos+2] = (val>>16) & 0xFF;
+   p->data[p->pos+3] = (val>>24) & 0xFF;
+   p->pos += 4;
+   return 1;
+}
+
+static int write_uint16(Packet *p, opus_uint16 val)
+{
+   if (p->pos>p->maxlen-2)
+      return 0;
+   p->data[p->pos  ] = (val    ) & 0xFF;
+   p->data[p->pos+1] = (val>> 8) & 0xFF;
+   p->pos += 2;
+   return 1;
+}
+
+static int write_chars(Packet *p, const unsigned char *str, int nb_chars)
+{
+   int i;
+   if (p->pos>p->maxlen-nb_chars)
+      return 0;
+   for (i=0;i<nb_chars;i++)
+      p->data[p->pos++] = str[i];
+   return 1;
+}
+
+static int write_matrix_chars(Packet *p, const OpusGenericEncoder *st)
+{
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+  opus_int32 size;
+  int ret;
+  ret=opeint_encoder_ctl(st, OPUS_PROJECTION_GET_DEMIXING_MATRIX_SIZE(&size));
+  if (ret != OPUS_OK) return 0;
+  if (size>p->maxlen-p->pos) return 0;
+  ret=opeint_encoder_ctl(st, OPUS_PROJECTION_GET_DEMIXING_MATRIX(&p->data[p->pos], size));
+  if (ret != OPUS_OK) return 0;
+  p->pos += size;
+  return 1;
+#else
+  (void)p;
+  (void)st;
+  return 0;
+#endif
+}
+
+int opeint_opus_header_get_size(const OpusHeader *h)
+{
+  int len=0;
+  if (opeint_use_projection(h->channel_mapping))
+  {
+    /* 19 bytes from fixed header,
+     * 2 bytes for nb_streams & nb_coupled,
+     * 2 bytes per cell of demixing matrix, where:
+     *    rows=channels, cols=nb_streams+nb_coupled
+     */
+    len=21+(h->channels*(h->nb_streams+h->nb_coupled)*2);
+  }
+  else
+  {
+    /* 19 bytes from fixed header,
+     * 2 bytes for nb_streams & nb_coupled,
+     * 1 byte per channel
+     */
+    len=21+h->channels;
+  }
+  return len;
+}
+
+int opeint_opus_header_to_packet(const OpusHeader *h, unsigned char *packet, int len, const OpusGenericEncoder *st)
+{
+   int i;
+   Packet p;
+   unsigned char ch;
+
+   p.data = packet;
+   p.maxlen = len;
+   p.pos = 0;
+   if (len<19)return 0;
+   if (!write_chars(&p, (const unsigned char*)"OpusHead", 8))
+      return 0;
+   /* Version is 1 */
+   ch = 1;
+   if (!write_chars(&p, &ch, 1))
+      return 0;
+
+   ch = h->channels;
+   if (!write_chars(&p, &ch, 1))
+      return 0;
+
+   if (!write_uint16(&p, h->preskip))
+      return 0;
+
+   if (!write_uint32(&p, h->input_sample_rate))
+      return 0;
+
+   if (opeint_use_projection(h->channel_mapping))
+   {
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+      opus_int32 matrix_gain;
+      int ret;
+      ret=opeint_encoder_ctl(st, OPUS_PROJECTION_GET_DEMIXING_MATRIX_GAIN(&matrix_gain));
+      if (ret != OPUS_OK) return 0;
+      if (!write_uint16(&p, h->gain + matrix_gain))
+         return 0;
+#else
+      return 0;
+#endif
+   }
+   else
+   {
+      if (!write_uint16(&p, h->gain))
+         return 0;
+   }
+
+   ch = h->channel_mapping;
+   if (!write_chars(&p, &ch, 1))
+      return 0;
+
+   if (h->channel_mapping != 0)
+   {
+      ch = h->nb_streams;
+      if (!write_chars(&p, &ch, 1))
+         return 0;
+
+      ch = h->nb_coupled;
+      if (!write_chars(&p, &ch, 1))
+         return 0;
+
+      /* Multi-stream support */
+      if (opeint_use_projection(h->channel_mapping))
+      {
+        if (!write_matrix_chars(&p, st))
+           return 0;
+      }
+      else
+      {
+        for (i=0;i<h->channels;i++)
+        {
+          if (!write_chars(&p, &h->stream_map[i], 1))
+             return 0;
+        }
+      }
+   }
+
+   return p.pos;
+}
+
+/*
+ Comments will be stored in the Vorbis style.
+ It is described in the "Structure" section of
+    http://www.xiph.org/ogg/vorbis/doc/v-comment.html
+
+ However, Opus and other non-vorbis formats omit the "framing_bit".
+
+The comment header is decoded as follows:
+  1) [vendor_length] = read an unsigned integer of 32 bits
+  2) [vendor_string] = read a UTF-8 vector as [vendor_length] octets
+  3) [user_comment_list_length] = read an unsigned integer of 32 bits
+  4) iterate [user_comment_list_length] times {
+     5) [length] = read an unsigned integer of 32 bits
+     6) this iteration's user comment = read a UTF-8 vector as [length] octets
+     }
+  7) done.
+*/
+
+#define readint(buf, base) (((buf[base+3]<<24)&0xff000000)| \
+                           ((buf[base+2]<<16)&0xff0000)| \
+                           ((buf[base+1]<<8)&0xff00)| \
+                           (buf[base]&0xff))
+#define writeint(buf, base, val) do{ buf[base+3]=((val)>>24)&0xff; \
+                                     buf[base+2]=((val)>>16)&0xff; \
+                                     buf[base+1]=((val)>>8)&0xff; \
+                                     buf[base]=(val)&0xff; \
+                                 }while(0)
+
+void opeint_comment_init(char **comments, int* length, const char *vendor_string)
+{
+  /*The 'vendor' field should be the actual encoding library used.*/
+  int vendor_length=strlen(vendor_string);
+  int user_comment_list_length=0;
+  int len=8+4+vendor_length+4;
+  char *p=(char*)malloc(len);
+  if (p == NULL) {
+    len=0;
+  } else {
+    memcpy(p, "OpusTags", 8);
+    writeint(p, 8, vendor_length);
+    memcpy(p+12, vendor_string, vendor_length);
+    writeint(p, 12+vendor_length, user_comment_list_length);
+  }
+  *length=len;
+  *comments=p;
+}
+
+int opeint_comment_add(char **comments, int* length, const char *tag, const char *val)
+{
+  char* p=*comments;
+  int vendor_length=readint(p, 8);
+  int user_comment_list_length=readint(p, 8+4+vendor_length);
+  int tag_len=(tag?strlen(tag)+1:0);
+  int val_len=strlen(val);
+  int len=(*length)+4+tag_len+val_len;
+
+  p=(char*)realloc(p, len);
+  if (p == NULL) return 1;
+
+  writeint(p, *length, tag_len+val_len);      /* length of comment */
+  if(tag){
+    memcpy(p+*length+4, tag, tag_len);        /* comment tag */
+    (p+*length+4)[tag_len-1] = '=';           /* separator */
+  }
+  memcpy(p+*length+4+tag_len, val, val_len);  /* comment */
+  writeint(p, 8+4+vendor_length, user_comment_list_length+1);
+  *comments=p;
+  *length=len;
+  return 0;
+}
+
+void opeint_comment_pad(char **comments, int* length, int amount)
+{
+  if(amount>0){
+    int i;
+    int newlen;
+    char* p=*comments;
+    /*Make sure there is at least amount worth of padding free, and
+       round up to the maximum that fits in the current ogg segments.*/
+    newlen=(*length+amount+255)/255*255-1;
+    p=realloc(p,newlen);
+    if (p == NULL) return;
+    for(i=*length;i<newlen;i++)p[i]=0;
+    *comments=p;
+    *length=newlen;
+  }
+}
+
+#undef readint
+#undef writeint
+
+/* Copyright (C)2012 Xiph.Org Foundation
+   File: opus_header.h
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef OPUS_HEADER_H
+#define OPUS_HEADER_H
+
+#include <stdlib.h>
+#include <opus.h>
+
+#include <opus_multistream.h>
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+#include <opus_projection.h>
+#endif
+
+typedef struct OpusGenericEncoder OpusGenericEncoder;
+struct OpusGenericEncoder {
+  OpusMSEncoder *ms;
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+  OpusProjectionEncoder *pr;
+#endif
+};
+
+int opeint_use_projection(int channel_mapping);
+
+int opeint_encoder_surround_init(OpusGenericEncoder *st, int Fs, int channels, int channel_mapping, int *nb_streams, int *nb_coupled, unsigned char *stream_map, int application);
+
+void opeint_encoder_cleanup(OpusGenericEncoder *st);
+
+int opeint_encoder_init(OpusGenericEncoder *st, opus_int32 Fs, int channels, int streams, int coupled_streams, const unsigned char *mapping, int application);
+
+int opeint_encode_float(OpusGenericEncoder *st, const float *pcm, int frame_size, unsigned char *data, opus_int32 max_data_bytes);
+
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+# define opeint_encoder_ctl(st, request) \
+    ((st)->pr!=NULL ? \
+    opus_projection_encoder_ctl((st)->pr, request) : \
+    opus_multistream_encoder_ctl((st)->ms, request))
+# define opeint_encoder_ctl2(st, request, value) \
+    ((st)->pr!=NULL ? \
+    opus_projection_encoder_ctl((st)->pr, request, value) : \
+    opus_multistream_encoder_ctl((st)->ms, request, value))
+#else
+# define opeint_encoder_ctl(st, request) \
+    opus_multistream_encoder_ctl((st)->ms, request)
+# define opeint_encoder_ctl2(st, request, value) \
+    opus_multistream_encoder_ctl((st)->ms, request, value)
+#endif
+
+typedef struct {
+   int version;
+   int channels; /* Number of channels: 1..255 */
+   int preskip;
+   opus_uint32 input_sample_rate;
+   opus_int32 gain; /* in dB S7.8 should be zero whenever possible */
+   int channel_mapping;
+   /* The rest is only used if channel_mapping != 0 */
+   int nb_streams;
+   int nb_coupled;
+   unsigned char stream_map[255];
+} OpusHeader;
+
+int opeint_opus_header_get_size(const OpusHeader *h);
+
+int opeint_opus_header_to_packet(const OpusHeader *h, unsigned char *packet, int len, const OpusGenericEncoder *st);
+
+void opeint_comment_init(char **comments, int* length, const char *vendor_string);
+
+int opeint_comment_add(char **comments, int* length, const char *tag, const char *val);
+
+void opeint_comment_pad(char **comments, int* length, int amount);
+
+#endif
+/* Copyright (C)2002-2017 Jean-Marc Valin
+   Copyright (C)2007-2013 Xiph.Org Foundation
+   Copyright (C)2008-2013 Gregory Maxwell
+   File: opusenc.c
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <stdarg.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+#include "opusenc.h"
+#include "opus_header.h"
+#include "speex_resampler.h"
+#include "picture.h"
+#include "ogg_packer.h"
+#include "unicode_support.h"
+
+/* Bump this when we change the ABI. */
+#define OPE_ABI_VERSION 0
+
+#define LPC_PADDING 120
+#define LPC_ORDER 24
+#define LPC_INPUT 480
+/* Make the following constant always equal to 2*cos(M_PI/LPC_PADDING) */
+#define LPC_GOERTZEL_CONST 1.99931465f
+
+/* Allow up to 2 seconds for delayed decision. */
+#define MAX_LOOKAHEAD 96000
+/* We can't have a circular buffer (because of delayed decision), so let's not copy too often. */
+#define BUFFER_EXTRA 24000
+
+#define BUFFER_SAMPLES (MAX_LOOKAHEAD + BUFFER_EXTRA)
+
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+
+#ifdef _MSC_VER
+# if (_MSC_VER < 1900)
+#  define snprintf _snprintf
+# endif
+#endif
+
+struct StdioObject {
+  FILE *file;
+};
+
+struct OggOpusComments {
+  char *comment;
+  int comment_length;
+  int seen_file_icons;
+};
+
+/* Create a new comments object. The vendor string is optional. */
+OggOpusComments *ope_comments_create(void) {
+  OggOpusComments *c;
+  const char *libopus_str;
+  char vendor_str[1024];
+  c = malloc(sizeof(*c));
+  if (c == NULL) return NULL;
+  libopus_str = opus_get_version_string();
+  snprintf(vendor_str, sizeof(vendor_str), "%s, %s %s", libopus_str, PACKAGE_NAME, PACKAGE_VERSION);
+  opeint_comment_init(&c->comment, &c->comment_length, vendor_str);
+  c->seen_file_icons = 0;
+  if (c->comment == NULL) {
+    free(c);
+    return NULL;
+  } else {
+    return c;
+  }
+}
+
+/* Create a deep copy of a comments object. */
+OggOpusComments *ope_comments_copy(OggOpusComments *comments) {
+  OggOpusComments *c;
+  c = malloc(sizeof(*c));
+  if (c == NULL) return NULL;
+  memcpy(c, comments, sizeof(*c));
+  c->comment = malloc(comments->comment_length);
+  if (c->comment == NULL) {
+    free(c);
+    return NULL;
+  } else {
+    memcpy(c->comment, comments->comment, comments->comment_length);
+    return c;
+  }
+}
+
+/* Destroys a comments object. */
+void ope_comments_destroy(OggOpusComments *comments){
+  free(comments->comment);
+  free(comments);
+}
+
+/* Add a comment. */
+int ope_comments_add(OggOpusComments *comments, const char *tag, const char *val) {
+  if (tag == NULL || val == NULL) return OPE_BAD_ARG;
+  if (strchr(tag, '=')) return OPE_BAD_ARG;
+  if (opeint_comment_add(&comments->comment, &comments->comment_length, tag, val)) return OPE_ALLOC_FAIL;
+  return OPE_OK;
+}
+
+/* Add a comment. */
+int ope_comments_add_string(OggOpusComments *comments, const char *tag_and_val) {
+  if (!strchr(tag_and_val, '=')) return OPE_BAD_ARG;
+  if (opeint_comment_add(&comments->comment, &comments->comment_length, NULL, tag_and_val)) return OPE_ALLOC_FAIL;
+  return OPE_OK;
+}
+
+int ope_comments_add_picture(OggOpusComments *comments, const char *filename, int picture_type, const char *description) {
+  char *picture_data;
+  int err;
+  picture_data = opeint_parse_picture_specification(filename, picture_type, description, &err, &comments->seen_file_icons);
+  if (picture_data == NULL || err != OPE_OK){
+    return err;
+  }
+  opeint_comment_add(&comments->comment, &comments->comment_length, "METADATA_BLOCK_PICTURE", picture_data);
+  free(picture_data);
+  return OPE_OK;
+}
+
+int ope_comments_add_picture_from_memory(OggOpusComments *comments, const char *ptr, size_t size, int picture_type, const char *description) {
+  char *picture_data;
+  int err;
+  picture_data = opeint_parse_picture_specification_from_memory(ptr, size, picture_type, description, &err, &comments->seen_file_icons);
+  if (picture_data == NULL || err != OPE_OK){
+    return err;
+  }
+  opeint_comment_add(&comments->comment, &comments->comment_length, "METADATA_BLOCK_PICTURE", picture_data);
+  free(picture_data);
+  return OPE_OK;
+}
+
+
+typedef struct EncStream EncStream;
+
+struct EncStream {
+  void *user_data;
+  int serialno_is_set;
+  int serialno;
+  int stream_is_init;
+  int packetno;
+  char *comment;
+  int comment_length;
+  int seen_file_icons;
+  int close_at_end;
+  int header_is_frozen;
+  opus_int64 end_granule;
+  opus_int64 granule_offset;
+  EncStream *next;
+};
+
+int opeint_use_projection(int channel_mapping) {
+  if (channel_mapping==3){
+    return 1;
+  }
+  return 0;
+}
+
+int opeint_encoder_surround_init(
+    OpusGenericEncoder *st, int Fs, int channels, int channel_mapping,
+    int *nb_streams, int *nb_coupled, unsigned char *stream_map, int application) {
+  int ret;
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+  if(opeint_use_projection(channel_mapping)){
+    int ci;
+    st->pr=opus_projection_ambisonics_encoder_create(Fs, channels,
+        channel_mapping, nb_streams, nb_coupled, application, &ret);
+    for (ci = 0; ci < channels; ci++) {
+      stream_map[ci] = ci;
+    }
+    st->ms=NULL;
+  }
+  else
+#endif
+  {
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+    st->pr=NULL;
+#endif
+    st->ms=opus_multistream_surround_encoder_create(Fs, channels,
+        channel_mapping, nb_streams, nb_coupled, stream_map, application, &ret);
+  }
+  return ret;
+}
+
+void opeint_encoder_cleanup(OpusGenericEncoder *st) {
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+    if (st->pr) opus_projection_encoder_destroy(st->pr);
+#endif
+    if (st->ms) opus_multistream_encoder_destroy(st->ms);
+}
+
+int opeint_encoder_init(
+    OpusGenericEncoder *st, opus_int32 Fs, int channels, int streams,
+    int coupled_streams, const unsigned char *mapping, int application) {
+  int ret;
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+  st->pr=NULL;
+#endif
+  st->ms=opus_multistream_encoder_create(Fs, channels, streams,
+      coupled_streams, mapping, application, &ret);
+  return ret;
+}
+
+int opeint_encode_float(
+    OpusGenericEncoder *st,
+    const float *pcm,
+    int frame_size,
+    unsigned char *data,
+    opus_int32 max_data_bytes) {
+  int ret;
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+  if (st->pr) ret=opus_projection_encode_float(st->pr, pcm, frame_size, data, max_data_bytes);
+  else
+#endif
+    ret=opus_multistream_encode_float(st->ms, pcm, frame_size, data, max_data_bytes);
+  return ret;
+}
+
+struct OggOpusEnc {
+  OpusGenericEncoder st;
+  oggpacker *oggp;
+  int unrecoverable;
+  int pull_api;
+  int rate;
+  int channels;
+  float *buffer;
+  int buffer_start;
+  int buffer_end;
+  SpeexResamplerState *re;
+  int frame_size;
+  int decision_delay;
+  int max_ogg_delay;
+  int global_granule_offset;
+  opus_int64 curr_granule;
+  opus_int64 write_granule;
+  opus_int64 last_page_granule;
+  int draining;
+  int frame_size_request;
+  float *lpc_buffer;
+  unsigned char *chaining_keyframe;
+  int chaining_keyframe_length;
+  OpusEncCallbacks callbacks;
+  ope_packet_func packet_callback;
+  void *packet_callback_data;
+  OpusHeader header;
+  int comment_padding;
+  EncStream *streams;
+  EncStream *last_stream;
+};
+
+static int output_pages(OggOpusEnc *enc) {
+  unsigned char *page;
+  int len;
+  while (oggp_get_next_page(enc->oggp, &page, &len)) {
+    int ret = enc->callbacks.write(enc->streams->user_data, page, len);
+    if (ret) return ret;
+  }
+  return 0;
+}
+static int oe_flush_page(OggOpusEnc *enc) {
+  oggp_flush_page(enc->oggp);
+  if (!enc->pull_api) return output_pages(enc);
+  return 0;
+}
+
+static int stdio_write(void *user_data, const unsigned char *ptr, opus_int32 len) {
+  int ret;
+  struct StdioObject *obj = (struct StdioObject*)user_data;
+  ret = fwrite(ptr, 1, len, obj->file) != (size_t)len;
+  return ret;
+}
+
+static int stdio_close(void *user_data) {
+  struct StdioObject *obj = (struct StdioObject*)user_data;
+  int ret = 0;
+  if (obj->file) ret = fclose(obj->file);
+  free(obj);
+  return ret!=0;
+}
+
+static const OpusEncCallbacks stdio_callbacks = {
+  stdio_write,
+  stdio_close
+};
+
+/* Create a new OggOpus file. */
+OggOpusEnc *ope_encoder_create_file(const char *path, OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error) {
+  OggOpusEnc *enc;
+  struct StdioObject *obj;
+  obj = malloc(sizeof(*obj));
+  if (obj == NULL) {
+    if (error) *error = OPE_ALLOC_FAIL;
+    return NULL;
+  }
+  enc = ope_encoder_create_callbacks(&stdio_callbacks, obj, comments, rate, channels, family, error);
+  if (enc == NULL || (error && *error)) {
+    free(obj);
+    return NULL;
+  }
+  obj->file = opeint_fopen(path, "wb");
+  if (!obj->file) {
+    if (error) *error = OPE_CANNOT_OPEN;
+    ope_encoder_destroy(enc);
+    return NULL;
+  }
+  return enc;
+}
+
+EncStream *stream_create(OggOpusComments *comments) {
+  EncStream *stream;
+  stream = malloc(sizeof(*stream));
+  if (!stream) return NULL;
+  stream->next = NULL;
+  stream->close_at_end = 1;
+  stream->serialno_is_set = 0;
+  stream->stream_is_init = 0;
+  stream->header_is_frozen = 0;
+  stream->granule_offset = 0;
+  stream->comment = malloc(comments->comment_length);
+  if (stream->comment == NULL) goto fail;
+  memcpy(stream->comment, comments->comment, comments->comment_length);
+  stream->comment_length = comments->comment_length;
+  stream->seen_file_icons = comments->seen_file_icons;
+  return stream;
+fail:
+  if (stream->comment) free(stream->comment);
+  free(stream);
+  return NULL;
+}
+
+static void stream_generate_serialno(EncStream *stream) {
+  stream->serialno = rand();
+  stream->serialno_is_set = 1;
+}
+
+static void stream_destroy(EncStream *stream) {
+  if (stream->comment) free(stream->comment);
+  free(stream);
+}
+
+static OggOpusEnc *ope_encoder_create_callbacks_impl(const OpusEncCallbacks *callbacks, void *user_data,
+    OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error) {
+  OggOpusEnc *enc=NULL;
+  int ret;
+  if (family != 0 && family != 1 &&
+#ifdef OPUS_HAVE_OPUS_PROJECTION_H
+      family != 2 && family != 3 &&
+#endif
+      family != 255 && family != -1) {
+    if (error) {
+      if (family < -1 || family > 255) *error = OPE_BAD_ARG;
+      else *error = OPE_UNIMPLEMENTED;
+    }
+    return NULL;
+  }
+  if (channels <= 0 || channels > 255) {
+    if (error) *error = OPE_BAD_ARG;
+    return NULL;
+  }
+  if (rate <= 0) {
+    if (error) *error = OPE_BAD_ARG;
+    return NULL;
+  }
+  /* Setting the most common failure up-front. */
+  if (error) *error = OPE_ALLOC_FAIL;
+  if ( (enc = malloc(sizeof(*enc))) == NULL) goto fail;
+  enc->buffer = NULL;
+  enc->lpc_buffer = NULL;
+  if ( (enc->streams = stream_create(comments)) == NULL) goto fail;
+  enc->last_stream = enc->streams;
+  enc->oggp = NULL;
+  /* Not initializing anything is an unrecoverable error. */
+  enc->unrecoverable = family == -1 ? OPE_TOO_LATE : 0;
+  enc->packet_callback = NULL;
+  enc->rate = rate;
+  enc->channels = channels;
+  enc->frame_size = 960;
+  enc->frame_size_request = OPUS_FRAMESIZE_20_MS;
+  enc->decision_delay = 96000;
+  enc->max_ogg_delay = 48000;
+  enc->chaining_keyframe = NULL;
+  enc->chaining_keyframe_length = -1;
+  enc->comment_padding = 512;
+  enc->header.channels=channels;
+  enc->header.channel_mapping=family;
+  enc->header.input_sample_rate=rate;
+  enc->header.gain=0;
+  if (family != -1) {
+    ret=opeint_encoder_surround_init(&enc->st, 48000, channels,
+        enc->header.channel_mapping, &enc->header.nb_streams,
+        &enc->header.nb_coupled, enc->header.stream_map,
+        OPUS_APPLICATION_AUDIO);
+    if (! (ret == OPUS_OK) ) {
+      if (ret == OPUS_BAD_ARG) ret = OPE_BAD_ARG;
+      else if (ret == OPUS_INTERNAL_ERROR) ret = OPE_INTERNAL_ERROR;
+      else if (ret == OPUS_UNIMPLEMENTED) ret = OPE_UNIMPLEMENTED;
+      else if (ret == OPUS_ALLOC_FAIL) ret = OPE_ALLOC_FAIL;
+      else ret = OPE_INTERNAL_ERROR;
+      if (error) *error = ret;
+      goto fail;
+    }
+    opeint_encoder_ctl(&enc->st, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_20_MS));
+  }
+  if (rate != 48000) {
+    enc->re = speex_resampler_init(channels, rate, 48000, 5, NULL);
+    if (enc->re == NULL) goto fail;
+    speex_resampler_skip_zeros(enc->re);
+  } else {
+    enc->re = NULL;
+  }
+  enc->global_granule_offset = -1;
+  enc->curr_granule = 0;
+  enc->write_granule = 0;
+  enc->last_page_granule = 0;
+  enc->draining = 0;
+  if ( (enc->buffer = malloc(sizeof(*enc->buffer)*BUFFER_SAMPLES*channels)) == NULL) goto fail;
+  if (rate != 48000) {
+    /* Allocate an extra LPC_PADDING samples so we can do the padding in-place. */
+    if ( (enc->lpc_buffer = malloc(sizeof(*enc->lpc_buffer)*(LPC_INPUT+LPC_PADDING)*channels)) == NULL) goto fail;
+    memset(enc->lpc_buffer, 0, sizeof(*enc->lpc_buffer)*LPC_INPUT*channels);
+  }
+  enc->buffer_start = enc->buffer_end = 0;
+  if (callbacks != NULL)
+  {
+    enc->callbacks = *callbacks;
+    enc->pull_api = 0;
+  } else {
+    enc->pull_api = 1;
+  }
+  enc->streams->user_data = user_data;
+  enc->streams->end_granule = 0;
+  if (error) *error = OPE_OK;
+  return enc;
+fail:
+  if (enc) {
+    opeint_encoder_cleanup(&enc->st);
+    if (enc->buffer) free(enc->buffer);
+    if (enc->streams) stream_destroy(enc->streams);
+    if (enc->lpc_buffer) free(enc->lpc_buffer);
+    free(enc);
+  }
+  return NULL;
+}
+
+/* Create a new OggOpus stream (callback-based). */
+OggOpusEnc *ope_encoder_create_callbacks(const OpusEncCallbacks *callbacks, void *user_data,
+    OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error) {
+  if (callbacks == NULL) {
+    if (error) *error = OPE_BAD_ARG;
+    return NULL;
+  }
+  return ope_encoder_create_callbacks_impl(callbacks, user_data, comments, rate, channels, family, error);
+}
+
+/* Create a new OggOpus stream, pulling one page at a time. */
+OggOpusEnc *ope_encoder_create_pull(OggOpusComments *comments, opus_int32 rate, int channels, int family, int *error) {
+  return ope_encoder_create_callbacks_impl(NULL, NULL, comments, rate, channels, family, error);
+}
+
+int ope_encoder_deferred_init_with_mapping(OggOpusEnc *enc, int family, int streams,
+    int coupled_streams, const unsigned char *mapping) {
+  int ret;
+  int i;
+  if (family < 0 || family > 255) return OPE_BAD_ARG;
+  else if (family != 1 &&
+  #ifdef OPUS_HAVE_OPUS_PROJECTION_H
+      family != 2 &&
+  #endif
+      family != 255) return OPE_UNIMPLEMENTED;
+  else if (streams <= 0 || streams>255 || coupled_streams<0 || coupled_streams >= 128 || streams+coupled_streams > 255) return OPE_BAD_ARG;
+  ret=opeint_encoder_init(&enc->st, 48000, enc->channels, streams, coupled_streams, mapping, OPUS_APPLICATION_AUDIO);
+  if (! (ret == OPUS_OK) ) {
+    if (ret == OPUS_BAD_ARG) ret = OPE_BAD_ARG;
+    else if (ret == OPUS_INTERNAL_ERROR) ret = OPE_INTERNAL_ERROR;
+    else if (ret == OPUS_UNIMPLEMENTED) ret = OPE_UNIMPLEMENTED;
+    else if (ret == OPUS_ALLOC_FAIL) ret = OPE_ALLOC_FAIL;
+    else ret = OPE_INTERNAL_ERROR;
+    return ret;
+  }
+  opeint_encoder_ctl(&enc->st, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_20_MS));
+  enc->unrecoverable = 0;
+  enc->header.channel_mapping=family;
+  enc->header.nb_streams = streams;
+  enc->header.nb_coupled = coupled_streams;
+  for (i=0;i<streams+coupled_streams;i++)
+    enc->header.stream_map[i] = mapping[i];
+  return OPE_OK;
+}
+
+static void init_stream(OggOpusEnc *enc) {
+  assert(!enc->streams->stream_is_init);
+  if (!enc->streams->serialno_is_set) stream_generate_serialno(enc->streams);
+
+  if (enc->oggp != NULL) oggp_chain(enc->oggp, enc->streams->serialno);
+  else {
+    enc->oggp = oggp_create(enc->streams->serialno);
+    if (enc->oggp == NULL) {
+      enc->unrecoverable = OPE_ALLOC_FAIL;
+      return;
+    }
+    oggp_set_muxing_delay(enc->oggp, enc->max_ogg_delay);
+  }
+  opeint_comment_pad(&enc->streams->comment, &enc->streams->comment_length, enc->comment_padding);
+
+  /* Get preskip at the last minute (when it can no longer change). */
+  if (enc->global_granule_offset == -1) {
+    opus_int32 tmp;
+    int ret;
+    ret=opeint_encoder_ctl(&enc->st, OPUS_GET_LOOKAHEAD(&tmp));
+    if (ret == OPUS_OK) enc->header.preskip = tmp;
+    else enc->header.preskip = 0;
+    enc->global_granule_offset = enc->header.preskip;
+  }
+  /*Write header*/
+  {
+    int header_size;
+    int ret;
+    int packet_size;
+    unsigned char *p;
+    header_size = opeint_opus_header_get_size(&enc->header);
+    p = oggp_get_packet_buffer(enc->oggp, header_size);
+    packet_size = opeint_opus_header_to_packet(&enc->header, p, header_size, &enc->st);
+    if (enc->packet_callback) enc->packet_callback(enc->packet_callback_data, p, packet_size, 0);
+    oggp_commit_packet(enc->oggp, packet_size, 0, 0);
+    ret = oe_flush_page(enc);
+    if (ret) {
+      enc->unrecoverable = OPE_WRITE_FAIL;
+      return;
+    }
+    p = oggp_get_packet_buffer(enc->oggp, enc->streams->comment_length);
+    memcpy(p, enc->streams->comment, enc->streams->comment_length);
+    if (enc->packet_callback) enc->packet_callback(enc->packet_callback_data, p, enc->streams->comment_length, 0);
+    oggp_commit_packet(enc->oggp, enc->streams->comment_length, 0, 0);
+    ret = oe_flush_page(enc);
+    if (ret) {
+      enc->unrecoverable = OPE_WRITE_FAIL;
+      return;
+    }
+  }
+  enc->streams->stream_is_init = 1;
+  enc->streams->packetno = 2;
+}
+
+static void shift_buffer(OggOpusEnc *enc) {
+  /* Leaving enough in the buffer to do LPC extension if needed. */
+  if (enc->buffer_start > LPC_INPUT) {
+    memmove(&enc->buffer[0], &enc->buffer[enc->channels*(enc->buffer_start-LPC_INPUT)],
+            enc->channels*(enc->buffer_end-enc->buffer_start+LPC_INPUT)*sizeof(*enc->buffer));
+    enc->buffer_end -= enc->buffer_start-LPC_INPUT;
+    enc->buffer_start = LPC_INPUT;
+  }
+}
+
+static int compute_frame_samples(int size_request) {
+  if (size_request <= OPUS_FRAMESIZE_40_MS) return 120<<(size_request-OPUS_FRAMESIZE_2_5_MS);
+  else return (size_request-OPUS_FRAMESIZE_2_5_MS-2)*960;
+}
+
+static void encode_buffer(OggOpusEnc *enc) {
+  opus_int32 max_packet_size;
+  /* Round up when converting the granule pos because the decoder will round down. */
+  opus_int64 end_granule48k = (enc->streams->end_granule*48000 + enc->rate - 1)/enc->rate + enc->global_granule_offset;
+  max_packet_size = (1277*6+2)*enc->header.nb_streams;
+  while (enc->buffer_end-enc->buffer_start > enc->frame_size + enc->decision_delay) {
+    int cont;
+    int e_o_s;
+    opus_int32 pred;
+    int nbBytes;
+    unsigned char *packet;
+    unsigned char *packet_copy = NULL;
+    int is_keyframe=0;
+    if (enc->unrecoverable) return;
+    opeint_encoder_ctl(&enc->st, OPUS_GET_PREDICTION_DISABLED(&pred));
+    /* FIXME: a frame that follows a keyframe generally doesn't need to be a keyframe
+       unless there's two consecutive stream boundaries. */
+    if (enc->curr_granule + 2*enc->frame_size>= end_granule48k && enc->streams->next) {
+      opeint_encoder_ctl(&enc->st, OPUS_SET_PREDICTION_DISABLED(1));
+      is_keyframe = 1;
+    }
+    /* Handle the last packet by making sure not to encode too much padding. */
+    if (enc->curr_granule+enc->frame_size >= end_granule48k && enc->draining && enc->frame_size_request > OPUS_FRAMESIZE_20_MS) {
+      int min_samples;
+      int frame_size_request = OPUS_FRAMESIZE_20_MS;
+      /* Minimum frame size required for the current frame to still meet the e_o_s condition. */
+      min_samples = end_granule48k - enc->curr_granule;
+      while (compute_frame_samples(frame_size_request) < min_samples) frame_size_request++;
+      assert(frame_size_request <= enc->frame_size_request);
+      ope_encoder_ctl(enc, OPUS_SET_EXPERT_FRAME_DURATION(frame_size_request));
+    }
+    packet = oggp_get_packet_buffer(enc->oggp, max_packet_size);
+    nbBytes = opeint_encode_float(&enc->st, &enc->buffer[enc->channels*enc->buffer_start],
+        enc->buffer_end-enc->buffer_start, packet, max_packet_size);
+    if (nbBytes < 0) {
+      /* Anything better we can do here? */
+      enc->unrecoverable = OPE_INTERNAL_ERROR;
+      return;
+    }
+    opeint_encoder_ctl(&enc->st, OPUS_SET_PREDICTION_DISABLED(pred));
+    assert(nbBytes > 0);
+    enc->curr_granule += enc->frame_size;
+    do {
+      int ret;
+      opus_int64 granulepos;
+      granulepos=enc->curr_granule-enc->streams->granule_offset;
+      e_o_s=enc->curr_granule >= end_granule48k;
+      cont = 0;
+      if (e_o_s) granulepos=end_granule48k-enc->streams->granule_offset;
+      if (packet_copy != NULL) {
+        packet = oggp_get_packet_buffer(enc->oggp, max_packet_size);
+        memcpy(packet, packet_copy, nbBytes);
+      }
+      if (enc->packet_callback) enc->packet_callback(enc->packet_callback_data, packet, nbBytes, 0);
+      if ((e_o_s || is_keyframe) && packet_copy == NULL) {
+        packet_copy = malloc(nbBytes);
+        if (packet_copy == NULL) {
+          /* Can't recover from allocation failing here. */
+          enc->unrecoverable = OPE_ALLOC_FAIL;
+          return;
+        }
+        memcpy(packet_copy, packet, nbBytes);
+      }
+      oggp_commit_packet(enc->oggp, nbBytes, granulepos, e_o_s);
+      if (e_o_s) ret = oe_flush_page(enc);
+      else if (!enc->pull_api) ret = output_pages(enc);
+      else ret = 0;
+      if (ret) {
+        enc->unrecoverable = OPE_WRITE_FAIL;
+        if (packet_copy) free(packet_copy);
+        return;
+      }
+      if (e_o_s) {
+        EncStream *tmp;
+        tmp = enc->streams->next;
+        if (enc->streams->close_at_end && !enc->pull_api) {
+          ret = enc->callbacks.close(enc->streams->user_data);
+          if (ret) {
+            enc->unrecoverable = OPE_CLOSE_FAIL;
+            free(packet_copy);
+            return;
+          }
+        }
+        stream_destroy(enc->streams);
+        enc->streams = tmp;
+        if (!tmp) enc->last_stream = NULL;
+        if (enc->last_stream == NULL) {
+          free(packet_copy);
+          return;
+        }
+        /* We're done with this stream, start the next one. */
+        enc->header.preskip = end_granule48k + enc->frame_size - enc->curr_granule;
+        enc->streams->granule_offset = enc->curr_granule - enc->frame_size;
+        if (enc->chaining_keyframe) {
+          enc->header.preskip += enc->frame_size;
+          enc->streams->granule_offset -= enc->frame_size;
+        }
+        init_stream(enc);
+        if (enc->chaining_keyframe) {
+          unsigned char *p;
+          opus_int64 granulepos2=enc->curr_granule - enc->streams->granule_offset - enc->frame_size;
+          p = oggp_get_packet_buffer(enc->oggp, enc->chaining_keyframe_length);
+          memcpy(p, enc->chaining_keyframe, enc->chaining_keyframe_length);
+          if (enc->packet_callback) enc->packet_callback(enc->packet_callback_data, enc->chaining_keyframe, enc->chaining_keyframe_length, 0);
+          oggp_commit_packet(enc->oggp, enc->chaining_keyframe_length, granulepos2, 0);
+        }
+        end_granule48k = (enc->streams->end_granule*48000 + enc->rate - 1)/enc->rate + enc->global_granule_offset;
+        cont = 1;
+      }
+    } while (cont);
+    if (enc->chaining_keyframe) free(enc->chaining_keyframe);
+    if (is_keyframe) {
+      enc->chaining_keyframe_length = nbBytes;
+      enc->chaining_keyframe = packet_copy;
+      packet_copy = NULL;
+    } else {
+      enc->chaining_keyframe = NULL;
+      enc->chaining_keyframe_length = -1;
+    }
+    if (packet_copy) free(packet_copy);
+    enc->buffer_start += enc->frame_size;
+  }
+  /* If we've reached the end of the buffer, move everything back to the front. */
+  if (enc->buffer_end == BUFFER_SAMPLES) {
+    shift_buffer(enc);
+  }
+  /* This function must never leave the buffer full. */
+  assert(enc->buffer_end < BUFFER_SAMPLES);
+}
+
+/* Add/encode any number of float samples to the file. */
+int ope_encoder_write_float(OggOpusEnc *enc, const float *pcm, int samples_per_channel) {
+  int channels = enc->channels;
+  if (enc->unrecoverable) return enc->unrecoverable;
+  enc->last_stream->header_is_frozen = 1;
+  if (!enc->streams->stream_is_init) init_stream(enc);
+  if (samples_per_channel < 0) return OPE_BAD_ARG;
+  enc->write_granule += samples_per_channel;
+  enc->last_stream->end_granule = enc->write_granule;
+  if (enc->lpc_buffer) {
+    int i;
+    if (samples_per_channel < LPC_INPUT) {
+      for (i=0;i<(LPC_INPUT-samples_per_channel)*channels;i++) enc->lpc_buffer[i] = enc->lpc_buffer[samples_per_channel*channels + i];
+      for (i=0;i<samples_per_channel*channels;i++) enc->lpc_buffer[(LPC_INPUT-samples_per_channel)*channels + i] = pcm[i];
+    } else {
+      for (i=0;i<LPC_INPUT*channels;i++) enc->lpc_buffer[i] = pcm[(samples_per_channel-LPC_INPUT)*channels + i];
+    }
+  }
+  do {
+    int i;
+    spx_uint32_t in_samples, out_samples;
+    out_samples = BUFFER_SAMPLES-enc->buffer_end;
+    if (enc->re != NULL) {
+      in_samples = samples_per_channel;
+      speex_resampler_process_interleaved_float(enc->re, pcm, &in_samples, &enc->buffer[channels*enc->buffer_end], &out_samples);
+    } else {
+      int curr;
+      curr = MIN((spx_uint32_t)samples_per_channel, out_samples);
+      for (i=0;i<channels*curr;i++) {
+      enc->buffer[channels*enc->buffer_end+i] = pcm[i];
+      }
+      in_samples = out_samples = curr;
+    }
+    enc->buffer_end += out_samples;
+    pcm += in_samples*channels;
+    samples_per_channel -= in_samples;
+    encode_buffer(enc);
+    if (enc->unrecoverable) return enc->unrecoverable;
+  } while (samples_per_channel > 0);
+  return OPE_OK;
+}
+
+#define CONVERT_BUFFER 4096
+
+/* Add/encode any number of int16 samples to the file. */
+int ope_encoder_write(OggOpusEnc *enc, const opus_int16 *pcm, int samples_per_channel) {
+  int channels = enc->channels;
+  if (enc->unrecoverable) return enc->unrecoverable;
+  enc->last_stream->header_is_frozen = 1;
+  if (!enc->streams->stream_is_init) init_stream(enc);
+  if (samples_per_channel < 0) return OPE_BAD_ARG;
+  enc->write_granule += samples_per_channel;
+  enc->last_stream->end_granule = enc->write_granule;
+  if (enc->lpc_buffer) {
+    int i;
+    if (samples_per_channel < LPC_INPUT) {
+      for (i=0;i<(LPC_INPUT-samples_per_channel)*channels;i++) enc->lpc_buffer[i] = enc->lpc_buffer[samples_per_channel*channels + i];
+      for (i=0;i<samples_per_channel*channels;i++) enc->lpc_buffer[(LPC_INPUT-samples_per_channel)*channels + i] = (1.f/32768)*pcm[i];
+    } else {
+      for (i=0;i<LPC_INPUT*channels;i++) enc->lpc_buffer[i] = (1.f/32768)*pcm[(samples_per_channel-LPC_INPUT)*channels + i];
+    }
+  }
+  do {
+    int i;
+    spx_uint32_t in_samples, out_samples;
+    out_samples = BUFFER_SAMPLES-enc->buffer_end;
+    if (enc->re != NULL) {
+      float buf[CONVERT_BUFFER];
+      in_samples = MIN(CONVERT_BUFFER/channels, samples_per_channel);
+      for (i=0;i<channels*(int)in_samples;i++) {
+        buf[i] = (1.f/32768)*pcm[i];
+      }
+      speex_resampler_process_interleaved_float(enc->re, buf, &in_samples, &enc->buffer[channels*enc->buffer_end], &out_samples);
+    } else {
+      int curr;
+      curr = MIN((spx_uint32_t)samples_per_channel, out_samples);
+      for (i=0;i<channels*curr;i++) {
+        enc->buffer[channels*enc->buffer_end+i] = (1.f/32768)*pcm[i];
+      }
+      in_samples = out_samples = curr;
+    }
+    enc->buffer_end += out_samples;
+    pcm += in_samples*channels;
+    samples_per_channel -= in_samples;
+    encode_buffer(enc);
+    if (enc->unrecoverable) return enc->unrecoverable;
+  } while (samples_per_channel > 0);
+  return OPE_OK;
+}
+
+/* Get the next page from the stream. Returns 1 if there is a page available, 0 if not. */
+int ope_encoder_get_page(OggOpusEnc *enc, unsigned char **page, opus_int32 *len, int flush) {
+  if (enc->unrecoverable) return enc->unrecoverable;
+  if (!enc->pull_api) return 0;
+  else {
+    if (flush) oggp_flush_page(enc->oggp);
+    return oggp_get_next_page(enc->oggp, page, len);
+  }
+}
+
+static void extend_signal(float *x, int before, int after, int channels);
+
+int ope_encoder_drain(OggOpusEnc *enc) {
+  int pad_samples;
+  int resampler_drain = 0;
+  if (enc->unrecoverable) return enc->unrecoverable;
+  /* Check if it's already been drained. */
+  if (enc->streams == NULL) return OPE_TOO_LATE;
+  if (!enc->streams->stream_is_init) init_stream(enc);
+  if (enc->re) resampler_drain = speex_resampler_get_output_latency(enc->re);
+  pad_samples = MAX(LPC_PADDING, enc->global_granule_offset + enc->frame_size + resampler_drain + 1);
+  shift_buffer(enc);
+  assert(enc->buffer_end + pad_samples <= BUFFER_SAMPLES);
+  memset(&enc->buffer[enc->channels*enc->buffer_end], 0, pad_samples*enc->channels*sizeof(enc->buffer[0]));
+  if (enc->re) {
+    spx_uint32_t in_samples, out_samples;
+    extend_signal(&enc->lpc_buffer[LPC_INPUT*enc->channels], LPC_INPUT, LPC_PADDING, enc->channels);
+    do {
+      in_samples = LPC_PADDING;
+      out_samples = pad_samples;
+      speex_resampler_process_interleaved_float(enc->re, &enc->lpc_buffer[LPC_INPUT*enc->channels], &in_samples, &enc->buffer[enc->channels*enc->buffer_end], &out_samples);
+      enc->buffer_end += out_samples;
+      pad_samples -= out_samples;
+      /* If we don't have enough padding, zero all zeros and repeat. */
+      memset(&enc->lpc_buffer[LPC_INPUT*enc->channels], 0, LPC_PADDING*enc->channels*sizeof(enc->lpc_buffer[0]));
+    } while (pad_samples > 0);
+  } else {
+    extend_signal(&enc->buffer[enc->channels*enc->buffer_end], enc->buffer_end, LPC_PADDING, enc->channels);
+    enc->buffer_end += pad_samples;
+  }
+  enc->decision_delay = 0;
+  enc->draining = 1;
+  assert(enc->buffer_end <= BUFFER_SAMPLES);
+  encode_buffer(enc);
+  if (enc->unrecoverable) return enc->unrecoverable;
+  /* Draining should have called all the streams to complete. */
+  assert(enc->streams == NULL);
+  return OPE_OK;
+}
+
+void ope_encoder_destroy(OggOpusEnc *enc) {
+  EncStream *stream;
+  stream = enc->streams;
+  while (stream != NULL) {
+    EncStream *tmp = stream;
+    stream = stream->next;
+    /* Ignore any error on close. */
+    if (tmp->close_at_end && !enc->pull_api) enc->callbacks.close(tmp->user_data);
+    stream_destroy(tmp);
+  }
+  if (enc->chaining_keyframe) free(enc->chaining_keyframe);
+  free(enc->buffer);
+  if (enc->oggp) oggp_destroy(enc->oggp);
+  opeint_encoder_cleanup(&enc->st);
+  if (enc->re) speex_resampler_destroy(enc->re);
+  if (enc->lpc_buffer) free(enc->lpc_buffer);
+  free(enc);
+}
+
+/* Ends the stream and create a new stream within the same file. */
+int ope_encoder_chain_current(OggOpusEnc *enc, OggOpusComments *comments) {
+  enc->last_stream->close_at_end = 0;
+  return ope_encoder_continue_new_callbacks(enc, enc->last_stream->user_data, comments);
+}
+
+/* Ends the stream and create a new file. */
+int ope_encoder_continue_new_file(OggOpusEnc *enc, const char *path, OggOpusComments *comments) {
+  int ret;
+  struct StdioObject *obj;
+  if (!(obj = malloc(sizeof(*obj)))) return OPE_ALLOC_FAIL;
+  obj->file = opeint_fopen(path, "wb");
+  if (!obj->file) {
+    free(obj);
+    /* By trying to open the file first, we can recover if we can't open it. */
+    return OPE_CANNOT_OPEN;
+  }
+  ret = ope_encoder_continue_new_callbacks(enc, obj, comments);
+  if (ret == OPE_OK) return ret;
+  fclose(obj->file);
+  free(obj);
+  return ret;
+}
+
+/* Ends the stream and create a new file (callback-based). */
+int ope_encoder_continue_new_callbacks(OggOpusEnc *enc, void *user_data, OggOpusComments *comments) {
+  EncStream *new_stream;
+  if (enc->unrecoverable) return enc->unrecoverable;
+  assert(enc->streams);
+  assert(enc->last_stream);
+  new_stream = stream_create(comments);
+  if (!new_stream) return OPE_ALLOC_FAIL;
+  new_stream->user_data = user_data;
+  new_stream->end_granule = enc->write_granule;
+  enc->last_stream->next = new_stream;
+  enc->last_stream = new_stream;
+  return OPE_OK;
+}
+
+int ope_encoder_flush_header(OggOpusEnc *enc) {
+  if (enc->unrecoverable) return enc->unrecoverable;
+  if (enc->last_stream->header_is_frozen) return OPE_TOO_LATE;
+  if (enc->last_stream->stream_is_init) return OPE_TOO_LATE;
+  else init_stream(enc);
+  return OPE_OK;
+}
+
+/* Goes straight to the libopus ctl() functions. */
+int ope_encoder_ctl(OggOpusEnc *enc, int request, ...) {
+  int ret;
+  int translate;
+  va_list ap;
+  if (enc->unrecoverable) return enc->unrecoverable;
+  va_start(ap, request);
+  ret = OPE_OK;
+  switch (request) {
+    case OPUS_SET_APPLICATION_REQUEST:
+    case OPUS_SET_BITRATE_REQUEST:
+    case OPUS_SET_MAX_BANDWIDTH_REQUEST:
+    case OPUS_SET_VBR_REQUEST:
+    case OPUS_SET_BANDWIDTH_REQUEST:
+    case OPUS_SET_COMPLEXITY_REQUEST:
+    case OPUS_SET_INBAND_FEC_REQUEST:
+    case OPUS_SET_PACKET_LOSS_PERC_REQUEST:
+    case OPUS_SET_DTX_REQUEST:
+    case OPUS_SET_VBR_CONSTRAINT_REQUEST:
+    case OPUS_SET_FORCE_CHANNELS_REQUEST:
+    case OPUS_SET_SIGNAL_REQUEST:
+    case OPUS_SET_LSB_DEPTH_REQUEST:
+    case OPUS_SET_PREDICTION_DISABLED_REQUEST:
+#ifdef OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST
+    case OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST:
+#endif
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      ret = opeint_encoder_ctl2(&enc->st, request, value);
+    }
+    break;
+    case OPUS_GET_LOOKAHEAD_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      ret = opeint_encoder_ctl(&enc->st, OPUS_GET_LOOKAHEAD(value));
+    }
+    break;
+    case OPUS_SET_EXPERT_FRAME_DURATION_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      int max_supported = OPUS_FRAMESIZE_60_MS;
+#ifdef OPUS_FRAMESIZE_120_MS
+      max_supported = OPUS_FRAMESIZE_120_MS;
+#endif
+      if (value < OPUS_FRAMESIZE_2_5_MS || value > max_supported) {
+        ret = OPUS_UNIMPLEMENTED;
+        break;
+      }
+      ret = opeint_encoder_ctl(&enc->st, OPUS_SET_EXPERT_FRAME_DURATION(value));
+      if (ret == OPUS_OK) {
+        enc->frame_size = compute_frame_samples(value);
+        enc->frame_size_request = value;
+      }
+    }
+    break;
+    case OPUS_GET_APPLICATION_REQUEST:
+    case OPUS_GET_BITRATE_REQUEST:
+    case OPUS_GET_MAX_BANDWIDTH_REQUEST:
+    case OPUS_GET_VBR_REQUEST:
+    case OPUS_GET_BANDWIDTH_REQUEST:
+    case OPUS_GET_COMPLEXITY_REQUEST:
+    case OPUS_GET_INBAND_FEC_REQUEST:
+    case OPUS_GET_PACKET_LOSS_PERC_REQUEST:
+    case OPUS_GET_DTX_REQUEST:
+    case OPUS_GET_VBR_CONSTRAINT_REQUEST:
+    case OPUS_GET_FORCE_CHANNELS_REQUEST:
+    case OPUS_GET_SIGNAL_REQUEST:
+    case OPUS_GET_LSB_DEPTH_REQUEST:
+    case OPUS_GET_PREDICTION_DISABLED_REQUEST:
+#ifdef OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST
+    case OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST:
+#endif
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      ret = opeint_encoder_ctl2(&enc->st, request, value);
+    }
+    break;
+    case OPUS_MULTISTREAM_GET_ENCODER_STATE_REQUEST:
+    {
+      opus_int32 stream_id;
+      OpusEncoder **value;
+      stream_id = va_arg(ap, opus_int32);
+      value = va_arg(ap, OpusEncoder**);
+      opeint_encoder_ctl(&enc->st, OPUS_MULTISTREAM_GET_ENCODER_STATE(stream_id, value));
+    }
+    break;
+
+    /* ****************** libopusenc-specific requests. ********************** */
+    case OPE_SET_DECISION_DELAY_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      if (value < 0) {
+        ret = OPE_BAD_ARG;
+        break;
+      }
+      value = MIN(value, MAX_LOOKAHEAD);
+      enc->decision_delay = value;
+    }
+    break;
+    case OPE_GET_DECISION_DELAY_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->decision_delay;
+    }
+    break;
+    case OPE_SET_MUXING_DELAY_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      if (value < 0) {
+        ret = OPE_BAD_ARG;
+        break;
+      }
+      enc->max_ogg_delay = value;
+      if (enc->oggp) oggp_set_muxing_delay(enc->oggp, enc->max_ogg_delay);
+    }
+    break;
+    case OPE_GET_MUXING_DELAY_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->max_ogg_delay;
+    }
+    break;
+    case OPE_SET_COMMENT_PADDING_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      if (value < 0) {
+        ret = OPE_BAD_ARG;
+        break;
+      }
+      enc->comment_padding = value;
+      ret = OPE_OK;
+    }
+    break;
+    case OPE_GET_COMMENT_PADDING_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->comment_padding;
+    }
+    break;
+    case OPE_SET_SERIALNO_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      if (!enc->last_stream || enc->last_stream->header_is_frozen) {
+        ret = OPE_TOO_LATE;
+        break;
+      }
+      enc->last_stream->serialno = value;
+      enc->last_stream->serialno_is_set = 1;
+      ret = OPE_OK;
+    }
+    break;
+    case OPE_GET_SERIALNO_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      if (!enc->last_stream) {
+        ret = OPE_TOO_LATE;
+        break;
+      }
+      if (!enc->last_stream->serialno_is_set) stream_generate_serialno(enc->last_stream);
+      *value = enc->last_stream->serialno;
+    }
+    break;
+    case OPE_SET_PACKET_CALLBACK_REQUEST:
+    {
+      ope_packet_func value = va_arg(ap, ope_packet_func);
+      void *data = va_arg(ap, void *);
+      enc->packet_callback = value;
+      enc->packet_callback_data = data;
+      ret = OPE_OK;
+    }
+    break;
+    case OPE_SET_HEADER_GAIN_REQUEST:
+    {
+      opus_int32 value = va_arg(ap, opus_int32);
+      if (!enc->last_stream || enc->last_stream->header_is_frozen) {
+        ret = OPE_TOO_LATE;
+        break;
+      }
+      enc->header.gain = value;
+      ret = OPE_OK;
+    }
+    break;
+    case OPE_GET_HEADER_GAIN_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->header.gain;
+    }
+    break;
+    case OPE_GET_NB_STREAMS_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->header.nb_streams;
+    }
+    break;
+    case OPE_GET_NB_COUPLED_STREAMS_REQUEST:
+    {
+      opus_int32 *value = va_arg(ap, opus_int32*);
+      *value = enc->header.nb_coupled;
+    }
+    break;
+    default:
+      ret = OPUS_UNIMPLEMENTED;
+  }
+  va_end(ap);
+  translate = ret != 0 && (request < 14000 || (ret < 0 && ret >= -10));
+  if (translate) {
+    if (ret == OPUS_BAD_ARG) ret = OPE_BAD_ARG;
+    else if (ret == OPUS_INTERNAL_ERROR) ret = OPE_INTERNAL_ERROR;
+    else if (ret == OPUS_UNIMPLEMENTED) ret = OPE_UNIMPLEMENTED;
+    else if (ret == OPUS_ALLOC_FAIL) ret = OPE_ALLOC_FAIL;
+    else ret = OPE_INTERNAL_ERROR;
+  }
+  assert(ret == 0 || ret < -10);
+  return ret;
+}
+
+const char *ope_strerror(int error) {
+  static const char * const ope_error_strings[] = {
+    "cannot open file",
+    "call cannot be made at this point",
+    "invalid picture file",
+    "invalid icon file (pictures of type 1 MUST be 32x32 PNGs)",
+    "write failed",
+    "close failed"
+  };
+  if (error == 0) return "success";
+  else if (error >= -10) return "unknown error";
+  else if (error > -30) return opus_strerror(error+10);
+  else if (error >= OPE_CLOSE_FAIL) return ope_error_strings[-error-30];
+  else return "unknown error";
+}
+
+const char *ope_get_version_string(void)
+{
+  return "libopusenc " PACKAGE_VERSION;
+}
+
+int ope_get_abi_version(void) {
+  return OPE_ABI_VERSION;
+}
+
+static void vorbis_lpc_from_data(float *data, float *lpci, int n, int stride);
+
+static void extend_signal(float *x, int before, int after, int channels) {
+  int c;
+  int i;
+  float window[LPC_PADDING];
+  if (after==0) return;
+  before = MIN(before, LPC_INPUT);
+  if (before < 4*LPC_ORDER) {
+    int i;
+    for (i=0;i<after*channels;i++) x[i] = 0;
+    return;
+  }
+  {
+    /* Generate Window using a resonating IIR aka Goertzel's algorithm. */
+    float m0=1, m1=.5*LPC_GOERTZEL_CONST;
+    float a1 = LPC_GOERTZEL_CONST;
+    window[0] = 1;
+    for (i=1;i<LPC_PADDING;i++) {
+      window[i] = a1*m0 - m1;
+      m1 = m0;
+      m0 = window[i];
+    }
+    for (i=0;i<LPC_PADDING;i++) window[i] = .5+.5*window[i];
+  }
+  for (c=0;c<channels;c++) {
+    float lpc[LPC_ORDER];
+    vorbis_lpc_from_data(x-channels*before+c, lpc, before, channels);
+    for (i=0;i<after;i++) {
+      float sum;
+      int j;
+      sum = 0;
+      for (j=0;j<LPC_ORDER;j++) sum -= x[(i-j-1)*channels + c]*lpc[j];
+      x[i*channels + c] = sum;
+    }
+    for (i=0;i<after;i++) x[i*channels + c] *= window[i];
+  }
+}
+
+/* Some of these routines (autocorrelator, LPC coefficient estimator)
+   are derived from code written by Jutta Degener and Carsten Bormann;
+   thus we include their copyright below.  The entirety of this file
+   is freely redistributable on the condition that both of these
+   copyright notices are preserved without modification.  */
+
+/* Preserved Copyright: *********************************************/
+
+/* Copyright 1992, 1993, 1994 by Jutta Degener and Carsten Bormann,
+Technische Universita"t Berlin
+
+Any use of this software is permitted provided that this notice is not
+removed and that neither the authors nor the Technische Universita"t
+Berlin are deemed to have made any representations as to the
+suitability of this software for any purpose nor are held responsible
+for any defects of this software. THERE IS ABSOLUTELY NO WARRANTY FOR
+THIS SOFTWARE.
+
+As a matter of courtesy, the authors request to be informed about uses
+this software has found, about bugs in this software, and about any
+improvements that may be of general interest.
+
+Berlin, 28.11.1994
+Jutta Degener
+Carsten Bormann
+
+*********************************************************************/
+
+static void vorbis_lpc_from_data(float *data, float *lpci, int n, int stride) {
+  double aut[LPC_ORDER+1];
+  double lpc[LPC_ORDER];
+  double error;
+  double epsilon;
+  int i,j;
+
+  /* FIXME: Apply a window to the input. */
+  /* autocorrelation, p+1 lag coefficients */
+  j=LPC_ORDER+1;
+  while(j--){
+    double d=0; /* double needed for accumulator depth */
+    for(i=j;i<n;i++)d+=(double)data[i*stride]*data[(i-j)*stride];
+    aut[j]=d;
+  }
+
+  /* Apply lag windowing (better than bandwidth expansion) */
+  if (LPC_ORDER <= 64) {
+    for (i=1;i<=LPC_ORDER;i++) {
+      /* Approximate this gaussian for low enough order. */
+      /* aut[i] *= exp(-.5*(2*M_PI*.002*i)*(2*M_PI*.002*i));*/
+      aut[i] -= aut[i]*(0.008f*0.008f)*i*i;
+    }
+  }
+  /* Generate lpc coefficients from autocorr values */
+
+  /* set our noise floor to about -100dB */
+  error=aut[0] * (1. + 1e-7);
+  epsilon=1e-6*aut[0]+1e-7;
+
+  for(i=0;i<LPC_ORDER;i++){
+    double r= -aut[i+1];
+
+    if(error<epsilon){
+      memset(lpc+i,0,(LPC_ORDER-i)*sizeof(*lpc));
+      goto done;
+    }
+
+    /* Sum up this iteration's reflection coefficient; note that in
+       Vorbis we don't save it.  If anyone wants to recycle this code
+       and needs reflection coefficients, save the results of 'r' from
+       each iteration. */
+
+    for(j=0;j<i;j++)r-=lpc[j]*aut[i-j];
+    r/=error;
+
+    /* Update LPC coefficients and total error */
+
+    lpc[i]=r;
+    for(j=0;j<i/2;j++){
+      double tmp=lpc[j];
+
+      lpc[j]+=r*lpc[i-1-j];
+      lpc[i-1-j]+=r*tmp;
+    }
+    if(i&1)lpc[j]+=lpc[j]*r;
+
+    error*=1.-r*r;
+
+  }
+
+ done:
+
+  /* slightly damp the filter */
+  {
+    double g = .999;
+    double damp = g;
+    for(j=0;j<LPC_ORDER;j++){
+      lpc[j]*=damp;
+      damp*=g;
+    }
+  }
+
+  for(j=0;j<LPC_ORDER;j++)lpci[j]=(float)lpc[j];
+}
+
+/* Copyright (C)2007-2013 Xiph.Org Foundation
+   File: picture.c
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifdef HAVE_CONFIG_H
+# include "config.h"
+#endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "picture.h"
+#include "unicode_support.h"
+
+static const char BASE64_TABLE[64]={
+  'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P',
+  'Q','R','S','T','U','V','W','X','Y','Z','a','b','c','d','e','f',
+  'g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v',
+  'w','x','y','z','0','1','2','3','4','5','6','7','8','9','+','/'
+};
+
+/*Utility function for base64 encoding METADATA_BLOCK_PICTURE tags.
+  Stores BASE64_LENGTH(len)+1 bytes in dst (including a terminating NUL).*/
+static void base64_encode(char *dst, const char *src, int len){
+  unsigned s0;
+  unsigned s1;
+  unsigned s2;
+  int      ngroups;
+  int      i;
+  ngroups=len/3;
+  for(i=0;i<ngroups;i++){
+    s0=(unsigned char)src[3*i+0];
+    s1=(unsigned char)src[3*i+1];
+    s2=(unsigned char)src[3*i+2];
+    dst[4*i+0]=BASE64_TABLE[s0>>2];
+    dst[4*i+1]=BASE64_TABLE[(s0&3)<<4|s1>>4];
+    dst[4*i+2]=BASE64_TABLE[(s1&15)<<2|s2>>6];
+    dst[4*i+3]=BASE64_TABLE[s2&63];
+  }
+  len-=3*i;
+  if(len==1){
+    s0=(unsigned char)src[3*i+0];
+    dst[4*i+0]=BASE64_TABLE[s0>>2];
+    dst[4*i+1]=BASE64_TABLE[(s0&3)<<4];
+    dst[4*i+2]='=';
+    dst[4*i+3]='=';
+    i++;
+  }
+  else if(len==2){
+    s0=(unsigned char)src[3*i+0];
+    s1=(unsigned char)src[3*i+1];
+    dst[4*i+0]=BASE64_TABLE[s0>>2];
+    dst[4*i+1]=BASE64_TABLE[(s0&3)<<4|s1>>4];
+    dst[4*i+2]=BASE64_TABLE[(s1&15)<<2];
+    dst[4*i+3]='=';
+    i++;
+  }
+  dst[4*i]='\0';
+}
+
+/*A version of strncasecmp() that is guaranteed to only ignore the case of
+   ASCII characters.*/
+static int oi_strncasecmp(const char *a, const char *b, int n){
+  int i;
+  for(i=0;i<n;i++){
+    int aval;
+    int bval;
+    int diff;
+    aval=a[i];
+    bval=b[i];
+    if(aval>='a'&&aval<='z') {
+      aval-='a'-'A';
+    }
+    if(bval>='a'&&bval<='z'){
+      bval-='a'-'A';
+    }
+    diff=aval-bval;
+    if(diff){
+      return diff;
+    }
+  }
+  return 0;
+}
+
+static int is_jpeg(const unsigned char *buf, size_t length){
+  return length>=3&&memcmp(buf,"\xFF\xD8\xFF",3)==0;
+}
+
+static int is_png(const unsigned char *buf, size_t length){
+  return length>=8&&memcmp(buf,"\x89PNG\x0D\x0A\x1A\x0A",8)==0;
+}
+
+static int is_gif(const unsigned char *buf, size_t length){
+  return length>=6
+   &&(memcmp(buf,"GIF87a",6)==0||memcmp(buf,"GIF89a",6)==0);
+}
+
+#define READ_U32_BE(buf) \
+    (((opus_uint32)(buf)[0]<<24)|((buf)[1]<<16)|((buf)[2]<<8)|(buf)[3])
+
+/*Tries to extract the width, height, bits per pixel, and palette size of a
+   PNG.
+  On failure, simply leaves its outputs unmodified.*/
+static void extract_png_params(const unsigned char *data, size_t data_length,
+                        opus_uint32 *width, opus_uint32 *height,
+                        opus_uint32 *depth, opus_uint32 *colors,
+                        int *has_palette){
+  if(is_png(data,data_length)){
+    size_t offs;
+    offs=8;
+    while(data_length-offs>=12){
+      opus_uint32 chunk_len;
+      chunk_len=READ_U32_BE(data+offs);
+      if(chunk_len>data_length-(offs+12))break;
+      else if(chunk_len==13&&memcmp(data+offs+4,"IHDR",4)==0){
+        int color_type;
+        *width=READ_U32_BE(data+offs+8);
+        *height=READ_U32_BE(data+offs+12);
+        color_type=data[offs+17];
+        if(color_type==3){
+          *depth=24;
+          *has_palette=1;
+        }
+        else{
+          int sample_depth;
+          sample_depth=data[offs+16];
+          if(color_type==0)*depth=sample_depth;
+          else if(color_type==2)*depth=sample_depth*3;
+          else if(color_type==4)*depth=sample_depth*2;
+          else if(color_type==6)*depth=sample_depth*4;
+          *colors=0;
+          *has_palette=0;
+          break;
+        }
+      }
+      else if(*has_palette>0&&memcmp(data+offs+4,"PLTE",4)==0){
+        *colors=chunk_len/3;
+        break;
+      }
+      offs+=12+chunk_len;
+    }
+  }
+}
+
+/*Tries to extract the width, height, bits per pixel, and palette size of a
+   GIF.
+  On failure, simply leaves its outputs unmodified.*/
+static void extract_gif_params(const unsigned char *data, size_t data_length,
+                        opus_uint32 *width, opus_uint32 *height,
+                        opus_uint32 *depth, opus_uint32 *colors,
+                        int *has_palette){
+  if(is_gif(data,data_length)&&data_length>=14){
+    *width=data[6]|data[7]<<8;
+    *height=data[8]|data[9]<<8;
+    /*libFLAC hard-codes the depth to 24.*/
+    *depth=24;
+    *colors=1<<((data[10]&7)+1);
+    *has_palette=1;
+  }
+}
+
+
+/*Tries to extract the width, height, bits per pixel, and palette size of a
+   JPEG.
+  On failure, simply leaves its outputs unmodified.*/
+static void extract_jpeg_params(const unsigned char *data, size_t data_length,
+                         opus_uint32 *width, opus_uint32 *height,
+                         opus_uint32 *depth, opus_uint32 *colors,
+                         int *has_palette){
+  if(is_jpeg(data,data_length)){
+    size_t offs;
+    offs=2;
+    for(;;){
+      size_t segment_len;
+      int    marker;
+      while(offs<data_length&&data[offs]!=0xFF)offs++;
+      while(offs<data_length&&data[offs]==0xFF)offs++;
+      marker=data[offs];
+      offs++;
+      /*If we hit EOI* (end of image), or another SOI* (start of image),
+         or SOS (start of scan), then stop now.*/
+      if(offs>=data_length||(marker>=0xD8&&marker<=0xDA))break;
+      /*RST* (restart markers): skip (no segment length).*/
+      else if(marker>=0xD0&&marker<=0xD7)continue;
+      /*Read the length of the marker segment.*/
+      if(data_length-offs<2)break;
+      segment_len=data[offs]<<8|data[offs+1];
+      if(segment_len<2||data_length-offs<segment_len)break;
+      if(marker==0xC0||(marker>0xC0&&marker<0xD0&&(marker&3)!=0)){
+        /*Found a SOFn (start of frame) marker segment:*/
+        if(segment_len>=8){
+          *height=data[offs+3]<<8|data[offs+4];
+          *width=data[offs+5]<<8|data[offs+6];
+          *depth=data[offs+2]*data[offs+7];
+          *colors=0;
+          *has_palette=0;
+        }
+        break;
+      }
+      /*Other markers: skip the whole marker segment.*/
+      offs+=segment_len;
+    }
+  }
+}
+
+#define IMAX(a,b) ((a) > (b) ? (a) : (b))
+
+static unsigned char *opeint_read_picture_file(const char *filename, const char *description, int *error, size_t *size, size_t *offset) {
+  FILE          *picture_file;
+  size_t         cbuf;
+  size_t         nbuf;
+  size_t         data_offset;
+  unsigned char *buf;
+  picture_file=opeint_fopen(filename,"rb");
+  /*Buffer size: 8 static 4-byte fields plus 2 dynamic fields, plus the
+     file/URL data.
+    We reserve at least 10 bytes for the media type, in case we still need to
+     extract it from the file.*/
+  data_offset=32+strlen(description)+10;
+  buf=NULL;
+  /*Complicated case: we have a real file.
+    Read it in, attempt to parse the media type and image dimensions if
+     necessary, and validate what the user passed in.*/
+  if(picture_file==NULL){
+    *error = OPE_CANNOT_OPEN;
+    return NULL;
+  }
+  nbuf=data_offset;
+  /*Add a reasonable starting image file size.*/
+  cbuf=data_offset+65536;
+  for(;;){
+    unsigned char *new_buf;
+    size_t         nread;
+    new_buf=realloc(buf,cbuf);
+    if(new_buf==NULL){
+      fclose(picture_file);
+      free(buf);
+      *error = OPE_ALLOC_FAIL;
+      return NULL;
+    }
+    buf=new_buf;
+    nread=fread(buf+nbuf,1,cbuf-nbuf,picture_file);
+    nbuf+=nread;
+    if(nbuf<cbuf){
+      int file_error;
+      file_error=ferror(picture_file);
+      fclose(picture_file);
+      if(file_error){
+        free(buf);
+        *error = OPE_INVALID_PICTURE;
+        return NULL;
+      }
+      break;
+    }
+    if(cbuf==0xFFFFFFFF){
+      fclose(picture_file);
+      free(buf);
+      *error = OPE_INVALID_PICTURE;
+      return NULL;
+    }
+    else if(cbuf>0x7FFFFFFFU)cbuf=0xFFFFFFFFU;
+    else cbuf=cbuf<<1|1;
+  }
+  *size = nbuf;
+  *offset = data_offset;
+  return buf;
+}
+
+static int validate_picture_type(int picture_type, int seen_file_icons) {
+  if (picture_type > 20) return 0;
+  if(picture_type>=1&&picture_type<=2&&(seen_file_icons&picture_type)) return 0;
+  return 1;
+}
+
+/*Parse a picture SPECIFICATION as given on the command-line.
+  spec: The specification.
+  error_message: Returns an error message on error.
+  seen_file_icons: Bit flags used to track if any pictures of type 1 or type 2
+   have already been added, to ensure only one is allowed.
+  Return: A Base64-encoded string suitable for use in a METADATA_BLOCK_PICTURE
+   tag.*/
+static char *opeint_parse_picture_specification_impl(unsigned char *buf, size_t nbuf, size_t data_offset, int picture_type, const char *description,
+                                  int *error, int *seen_file_icons){
+  opus_uint32  width;
+  opus_uint32  height;
+  opus_uint32  depth;
+  opus_uint32  colors;
+  const char    *mime_type;
+  char          *out;
+  size_t         data_length;
+  size_t         b64_length;
+  int          has_palette;
+  *error = OPE_OK;
+  if (picture_type < 0) picture_type=3;
+  if (!validate_picture_type(picture_type, *seen_file_icons)) {
+    *error = OPE_INVALID_PICTURE;
+    return NULL;
+  }
+  if (buf == NULL) return NULL;
+  data_length=nbuf-data_offset;
+  /*Try to extract the image dimensions/color information from the file.*/
+  width=height=depth=colors=0;
+  has_palette=-1;
+  {
+    if(is_jpeg(buf+data_offset,data_length)){
+      mime_type="image/jpeg";
+      extract_jpeg_params(buf+data_offset,data_length,
+       &width,&height,&depth,&colors,&has_palette);
+    }
+    else if(is_png(buf+data_offset,data_length)){
+      mime_type="image/png";
+      extract_png_params(buf+data_offset,data_length,
+       &width,&height,&depth,&colors,&has_palette);
+    }
+    else if(is_gif(buf+data_offset,data_length)){
+      mime_type="image/gif";
+      extract_gif_params(buf+data_offset,data_length,
+       &width,&height,&depth,&colors,&has_palette);
+    }
+    else{
+      *error = OPE_INVALID_PICTURE;
+      return NULL;
+    }
+  }
+  /*These fields MUST be set correctly OR all set to zero.
+    So if any of them (except colors, for which 0 is a valid value) are still
+     zero, clear the rest to zero.*/
+  if(width==0||height==0||depth==0)width=height=depth=colors=0;
+  if(picture_type==1&&(width!=32||height!=32
+   ||strlen(mime_type)!=9
+   ||oi_strncasecmp("image/png",mime_type,9)!=0)){
+    *error = OPE_INVALID_ICON;
+    return NULL;
+  }
+  /*Build the METADATA_BLOCK_PICTURE buffer.
+    We do this backwards from data_offset, because we didn't necessarily know
+     how big the media type string was before we read the data in.*/
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,(unsigned long)data_length);
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,colors);
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,depth);
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,height);
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,width);
+  data_offset-=strlen(description);
+  memcpy(buf+data_offset,description,strlen(description));
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,strlen(description));
+  data_offset-=strlen(mime_type);
+  memcpy(buf+data_offset,mime_type,strlen(mime_type));
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,strlen(mime_type));
+  data_offset-=4;
+  WRITE_U32_BE(buf+data_offset,picture_type);
+  data_length=nbuf-data_offset;
+  b64_length=BASE64_LENGTH(data_length);
+  out=(char *)malloc(b64_length+1);
+  if(out!=NULL){
+    base64_encode(out,(char *)buf+data_offset,data_length);
+    if(picture_type>=1&&picture_type<=2)*seen_file_icons|=picture_type;
+  } else {
+    *error = OPE_ALLOC_FAIL;
+  }
+  return out;
+}
+
+char *opeint_parse_picture_specification(const char *filename, int picture_type, const char *description,
+                                  int *error, int *seen_file_icons){
+  size_t nbuf;
+  size_t data_offset;
+  unsigned char *buf;
+  char *ret;
+  if (picture_type < 0) picture_type=3;
+  if (!validate_picture_type(picture_type, *seen_file_icons)) {
+    *error = OPE_INVALID_PICTURE;
+    return NULL;
+  }
+  if (description == NULL) description = "";
+  buf = opeint_read_picture_file(filename, description, error, &nbuf, &data_offset);
+  if (buf == NULL) return NULL;
+  ret = opeint_parse_picture_specification_impl(buf, nbuf, data_offset, picture_type, description, error, seen_file_icons);
+  free(buf);
+  return ret;
+}
+
+char *opeint_parse_picture_specification_from_memory(const char *mem, size_t size, int picture_type, const char *description,
+                                  int *error, int *seen_file_icons){
+  size_t nbuf;
+  size_t data_offset;
+  unsigned char *buf;
+  char *ret;
+  if (picture_type < 0) picture_type=3;
+  if (!validate_picture_type(picture_type, *seen_file_icons)) {
+    *error = OPE_INVALID_PICTURE;
+    return NULL;
+  }
+  if (description == NULL) description = "";
+  data_offset=32+strlen(description)+10;
+  nbuf = data_offset + size;
+  buf = (unsigned char *)malloc(nbuf);
+  if (buf == NULL) {
+    *error = OPE_ALLOC_FAIL;
+    return NULL;
+  }
+  memcpy(buf+data_offset, mem, size);
+  ret = opeint_parse_picture_specification_impl(buf, nbuf, data_offset, picture_type, description, error, seen_file_icons);
+  free(buf);
+  return ret;
+}
+/* Copyright (C)2007-2013 Xiph.Org Foundation
+   File: picture.h
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#ifndef PICTURE_H
+#define PICTURE_H
+
+#include <opus.h>
+#include "opusenc.h"
+
+typedef enum{
+  PIC_FORMAT_JPEG,
+  PIC_FORMAT_PNG,
+  PIC_FORMAT_GIF
+}picture_format;
+
+#define BASE64_LENGTH(len) (((len)+2)/3*4)
+
+char *opeint_parse_picture_specification(const char *filename, int picture_type, const char *description,
+                                  int *error, int *seen_file_icons);
+
+char *opeint_parse_picture_specification_from_memory(const char *mem, size_t size, int picture_type, const char *description,
+                                  int *error, int *seen_file_icons);
+
+#define WRITE_U32_BE(buf, val) \
+  do{ \
+    (buf)[0]=(unsigned char)((val)>>24); \
+    (buf)[1]=(unsigned char)((val)>>16); \
+    (buf)[2]=(unsigned char)((val)>>8); \
+    (buf)[3]=(unsigned char)(val); \
+  } \
+  while(0);
+
+#endif /* PICTURE_H */
+/* Copyright (C) 2007-2008 Jean-Marc Valin
+ * Copyright (C) 2008 Thorvald Natvig
+ */
+/**
+   @file resample_sse.h
+   @brief Resampler functions (SSE version)
+*/
+/*
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   - Neither the name of the Xiph.org Foundation nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#include <xmmintrin.h>
+
+#define OVERRIDE_INNER_PRODUCT_SINGLE
+static inline float inner_product_single(const float *a, const float *b, unsigned int len)
+{
+   int i;
+   float ret;
+   __m128 sum = _mm_setzero_ps();
+   for (i=0;i<len;i+=8)
+   {
+      sum = _mm_add_ps(sum, _mm_mul_ps(_mm_loadu_ps(a+i), _mm_loadu_ps(b+i)));
+      sum = _mm_add_ps(sum, _mm_mul_ps(_mm_loadu_ps(a+i+4), _mm_loadu_ps(b+i+4)));
+   }
+   sum = _mm_add_ps(sum, _mm_movehl_ps(sum, sum));
+   sum = _mm_add_ss(sum, _mm_shuffle_ps(sum, sum, 0x55));
+   _mm_store_ss(&ret, sum);
+   return ret;
+}
+
+#define OVERRIDE_INTERPOLATE_PRODUCT_SINGLE
+static inline float interpolate_product_single(const float *a, const float *b, unsigned int len, const spx_uint32_t oversample, float *frac) {
+  int i;
+  float ret;
+  __m128 sum = _mm_setzero_ps();
+  __m128 f = _mm_loadu_ps(frac);
+  for(i=0;i<len;i+=2)
+  {
+    sum = _mm_add_ps(sum, _mm_mul_ps(_mm_load1_ps(a+i), _mm_loadu_ps(b+i*oversample)));
+    sum = _mm_add_ps(sum, _mm_mul_ps(_mm_load1_ps(a+i+1), _mm_loadu_ps(b+(i+1)*oversample)));
+  }
+   sum = _mm_mul_ps(f, sum);
+   sum = _mm_add_ps(sum, _mm_movehl_ps(sum, sum));
+   sum = _mm_add_ss(sum, _mm_shuffle_ps(sum, sum, 0x55));
+   _mm_store_ss(&ret, sum);
+   return ret;
+}
+
+#ifdef __SSE2__
+#include <emmintrin.h>
+#define OVERRIDE_INNER_PRODUCT_DOUBLE
+
+static inline double inner_product_double(const float *a, const float *b, unsigned int len)
+{
+   int i;
+   double ret;
+   __m128d sum = _mm_setzero_pd();
+   __m128 t;
+   for (i=0;i<len;i+=8)
+   {
+      t = _mm_mul_ps(_mm_loadu_ps(a+i), _mm_loadu_ps(b+i));
+      sum = _mm_add_pd(sum, _mm_cvtps_pd(t));
+      sum = _mm_add_pd(sum, _mm_cvtps_pd(_mm_movehl_ps(t, t)));
+
+      t = _mm_mul_ps(_mm_loadu_ps(a+i+4), _mm_loadu_ps(b+i+4));
+      sum = _mm_add_pd(sum, _mm_cvtps_pd(t));
+      sum = _mm_add_pd(sum, _mm_cvtps_pd(_mm_movehl_ps(t, t)));
+   }
+   sum = _mm_add_sd(sum, _mm_unpackhi_pd(sum, sum));
+   _mm_store_sd(&ret, sum);
+   return ret;
+}
+
+#define OVERRIDE_INTERPOLATE_PRODUCT_DOUBLE
+static inline double interpolate_product_double(const float *a, const float *b, unsigned int len, const spx_uint32_t oversample, float *frac) {
+  int i;
+  double ret;
+  __m128d sum;
+  __m128d sum1 = _mm_setzero_pd();
+  __m128d sum2 = _mm_setzero_pd();
+  __m128 f = _mm_loadu_ps(frac);
+  __m128d f1 = _mm_cvtps_pd(f);
+  __m128d f2 = _mm_cvtps_pd(_mm_movehl_ps(f,f));
+  __m128 t;
+  for(i=0;i<len;i+=2)
+  {
+    t = _mm_mul_ps(_mm_load1_ps(a+i), _mm_loadu_ps(b+i*oversample));
+    sum1 = _mm_add_pd(sum1, _mm_cvtps_pd(t));
+    sum2 = _mm_add_pd(sum2, _mm_cvtps_pd(_mm_movehl_ps(t, t)));
+
+    t = _mm_mul_ps(_mm_load1_ps(a+i+1), _mm_loadu_ps(b+(i+1)*oversample));
+    sum1 = _mm_add_pd(sum1, _mm_cvtps_pd(t));
+    sum2 = _mm_add_pd(sum2, _mm_cvtps_pd(_mm_movehl_ps(t, t)));
+  }
+  sum1 = _mm_mul_pd(f1, sum1);
+  sum2 = _mm_mul_pd(f2, sum2);
+  sum = _mm_add_pd(sum1, sum2);
+  sum = _mm_add_sd(sum, _mm_unpackhi_pd(sum, sum));
+  _mm_store_sd(&ret, sum);
+  return ret;
+}
+
+#endif
+/* Copyright (C) 2007-2008 Jean-Marc Valin
+   Copyright (C) 2008      Thorvald Natvig
+
+   File: resample.c
+   Arbitrary resampling code
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are
+   met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+   IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+   OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+   INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+   STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+   ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+   POSSIBILITY OF SUCH DAMAGE.
+*/
+
+/*
+   The design goals of this code are:
+      - Very fast algorithm
+      - SIMD-friendly algorithm
+      - Low memory requirement
+      - Good *perceptual* quality (and not best SNR)
+
+   Warning: This resampler is relatively new. Although I think I got rid of
+   all the major bugs and I don't expect the API to change anymore, there
+   may be something I've missed. So use with caution.
+
+   This algorithm is based on this original resampling algorithm:
+   Smith, Julius O. Digital Audio Resampling Home Page
+   Center for Computer Research in Music and Acoustics (CCRMA),
+   Stanford University, 2007.
+   Web published at https://ccrma.stanford.edu/~jos/resample/.
+
+   There is one main difference, though. This resampler uses cubic
+   interpolation instead of linear interpolation in the above paper. This
+   makes the table much smaller and makes it possible to compute that table
+   on a per-stream basis. In turn, being able to tweak the table for each
+   stream makes it possible to both reduce complexity on simple ratios
+   (e.g. 2/3), and get rid of the rounding operations in the inner loop.
+   The latter both reduces CPU time and makes the algorithm more SIMD-friendly.
+*/
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#ifdef OUTSIDE_SPEEX
+#include <stdlib.h>
+static void *speex_alloc(int size) {return calloc(size,1);}
+static void *speex_realloc(void *ptr, int size) {return realloc(ptr, size);}
+static void speex_free(void *ptr) {free(ptr);}
+#ifndef EXPORT
+#define EXPORT
+#endif
+#include "speex_resampler.h"
+#include "arch.h"
+#else /* OUTSIDE_SPEEX */
+
+#include "speex/speex_resampler.h"
+#include "arch.h"
+#include "os_support.h"
+#endif /* OUTSIDE_SPEEX */
+
+#include <math.h>
+#include <limits.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#define IMAX(a,b) ((a) > (b) ? (a) : (b))
+#define IMIN(a,b) ((a) < (b) ? (a) : (b))
+
+#ifndef NULL
+#define NULL 0
+#endif
+
+#ifndef UINT32_MAX
+#define UINT32_MAX 4294967295U
+#endif
+
+#if defined(__SSE__) && !defined(FIXED_POINT)
+#include "resample_sse.h"
+#endif
+
+#ifdef USE_NEON
+#include "resample_neon.h"
+#endif
+
+/* Numer of elements to allocate on the stack */
+#ifdef VAR_ARRAYS
+#define FIXED_STACK_ALLOC 8192
+#else
+#define FIXED_STACK_ALLOC 1024
+#endif
+
+typedef int (*resampler_basic_func)(SpeexResamplerState *, spx_uint32_t , const spx_word16_t *, spx_uint32_t *, spx_word16_t *, spx_uint32_t *);
+
+struct SpeexResamplerState_ {
+   spx_uint32_t in_rate;
+   spx_uint32_t out_rate;
+   spx_uint32_t num_rate;
+   spx_uint32_t den_rate;
+
+   int    quality;
+   spx_uint32_t nb_channels;
+   spx_uint32_t filt_len;
+   spx_uint32_t mem_alloc_size;
+   spx_uint32_t buffer_size;
+   int          int_advance;
+   int          frac_advance;
+   float  cutoff;
+   spx_uint32_t oversample;
+   int          initialised;
+   int          started;
+
+   /* These are per-channel */
+   spx_int32_t  *last_sample;
+   spx_uint32_t *samp_frac_num;
+   spx_uint32_t *magic_samples;
+
+   spx_word16_t *mem;
+   spx_word16_t *sinc_table;
+   spx_uint32_t sinc_table_length;
+   resampler_basic_func resampler_ptr;
+
+   int    in_stride;
+   int    out_stride;
+} ;
+
+static const double kaiser12_table[68] = {
+   0.99859849, 1.00000000, 0.99859849, 0.99440475, 0.98745105, 0.97779076,
+   0.96549770, 0.95066529, 0.93340547, 0.91384741, 0.89213598, 0.86843014,
+   0.84290116, 0.81573067, 0.78710866, 0.75723148, 0.72629970, 0.69451601,
+   0.66208321, 0.62920216, 0.59606986, 0.56287762, 0.52980938, 0.49704014,
+   0.46473455, 0.43304576, 0.40211431, 0.37206735, 0.34301800, 0.31506490,
+   0.28829195, 0.26276832, 0.23854851, 0.21567274, 0.19416736, 0.17404546,
+   0.15530766, 0.13794294, 0.12192957, 0.10723616, 0.09382272, 0.08164178,
+   0.07063950, 0.06075685, 0.05193064, 0.04409466, 0.03718069, 0.03111947,
+   0.02584161, 0.02127838, 0.01736250, 0.01402878, 0.01121463, 0.00886058,
+   0.00691064, 0.00531256, 0.00401805, 0.00298291, 0.00216702, 0.00153438,
+   0.00105297, 0.00069463, 0.00043489, 0.00025272, 0.00013031, 0.0000527734,
+   0.00001000, 0.00000000};
+/*
+static const double kaiser12_table[36] = {
+   0.99440475, 1.00000000, 0.99440475, 0.97779076, 0.95066529, 0.91384741,
+   0.86843014, 0.81573067, 0.75723148, 0.69451601, 0.62920216, 0.56287762,
+   0.49704014, 0.43304576, 0.37206735, 0.31506490, 0.26276832, 0.21567274,
+   0.17404546, 0.13794294, 0.10723616, 0.08164178, 0.06075685, 0.04409466,
+   0.03111947, 0.02127838, 0.01402878, 0.00886058, 0.00531256, 0.00298291,
+   0.00153438, 0.00069463, 0.00025272, 0.0000527734, 0.00000500, 0.00000000};
+*/
+static const double kaiser10_table[36] = {
+   0.99537781, 1.00000000, 0.99537781, 0.98162644, 0.95908712, 0.92831446,
+   0.89005583, 0.84522401, 0.79486424, 0.74011713, 0.68217934, 0.62226347,
+   0.56155915, 0.50119680, 0.44221549, 0.38553619, 0.33194107, 0.28205962,
+   0.23636152, 0.19515633, 0.15859932, 0.12670280, 0.09935205, 0.07632451,
+   0.05731132, 0.04193980, 0.02979584, 0.02044510, 0.01345224, 0.00839739,
+   0.00488951, 0.00257636, 0.00115101, 0.00035515, 0.00000000, 0.00000000};
+
+static const double kaiser8_table[36] = {
+   0.99635258, 1.00000000, 0.99635258, 0.98548012, 0.96759014, 0.94302200,
+   0.91223751, 0.87580811, 0.83439927, 0.78875245, 0.73966538, 0.68797126,
+   0.63451750, 0.58014482, 0.52566725, 0.47185369, 0.41941150, 0.36897272,
+   0.32108304, 0.27619388, 0.23465776, 0.19672670, 0.16255380, 0.13219758,
+   0.10562887, 0.08273982, 0.06335451, 0.04724088, 0.03412321, 0.02369490,
+   0.01563093, 0.00959968, 0.00527363, 0.00233883, 0.00050000, 0.00000000};
+
+static const double kaiser6_table[36] = {
+   0.99733006, 1.00000000, 0.99733006, 0.98935595, 0.97618418, 0.95799003,
+   0.93501423, 0.90755855, 0.87598009, 0.84068475, 0.80211977, 0.76076565,
+   0.71712752, 0.67172623, 0.62508937, 0.57774224, 0.53019925, 0.48295561,
+   0.43647969, 0.39120616, 0.34752997, 0.30580127, 0.26632152, 0.22934058,
+   0.19505503, 0.16360756, 0.13508755, 0.10953262, 0.08693120, 0.06722600,
+   0.05031820, 0.03607231, 0.02432151, 0.01487334, 0.00752000, 0.00000000};
+
+struct FuncDef {
+   const double *table;
+   int oversample;
+};
+
+static const struct FuncDef kaiser12_funcdef = {kaiser12_table, 64};
+#define KAISER12 (&kaiser12_funcdef)
+static const struct FuncDef kaiser10_funcdef = {kaiser10_table, 32};
+#define KAISER10 (&kaiser10_funcdef)
+static const struct FuncDef kaiser8_funcdef = {kaiser8_table, 32};
+#define KAISER8 (&kaiser8_funcdef)
+static const struct FuncDef kaiser6_funcdef = {kaiser6_table, 32};
+#define KAISER6 (&kaiser6_funcdef)
+
+struct QualityMapping {
+   int base_length;
+   int oversample;
+   float downsample_bandwidth;
+   float upsample_bandwidth;
+   const struct FuncDef *window_func;
+};
+
+
+/* This table maps conversion quality to internal parameters. There are two
+   reasons that explain why the up-sampling bandwidth is larger than the
+   down-sampling bandwidth:
+   1) When up-sampling, we can assume that the spectrum is already attenuated
+      close to the Nyquist rate (from an A/D or a previous resampling filter)
+   2) Any aliasing that occurs very close to the Nyquist rate will be masked
+      by the sinusoids/noise just below the Nyquist rate (guaranteed only for
+      up-sampling).
+*/
+static const struct QualityMapping quality_map[11] = {
+   {  8,  4, 0.830f, 0.860f, KAISER6 }, /* Q0 */
+   { 16,  4, 0.850f, 0.880f, KAISER6 }, /* Q1 */
+   { 32,  4, 0.882f, 0.910f, KAISER6 }, /* Q2 */  /* 82.3% cutoff ( ~60 dB stop) 6  */
+   { 48,  8, 0.895f, 0.917f, KAISER8 }, /* Q3 */  /* 84.9% cutoff ( ~80 dB stop) 8  */
+   { 64,  8, 0.921f, 0.940f, KAISER8 }, /* Q4 */  /* 88.7% cutoff ( ~80 dB stop) 8  */
+   { 80, 16, 0.922f, 0.940f, KAISER10}, /* Q5 */  /* 89.1% cutoff (~100 dB stop) 10 */
+   { 96, 16, 0.940f, 0.945f, KAISER10}, /* Q6 */  /* 91.5% cutoff (~100 dB stop) 10 */
+   {128, 16, 0.950f, 0.950f, KAISER10}, /* Q7 */  /* 93.1% cutoff (~100 dB stop) 10 */
+   {160, 16, 0.960f, 0.960f, KAISER10}, /* Q8 */  /* 94.5% cutoff (~100 dB stop) 10 */
+   {192, 32, 0.968f, 0.968f, KAISER12}, /* Q9 */  /* 95.5% cutoff (~100 dB stop) 10 */
+   {256, 32, 0.975f, 0.975f, KAISER12}, /* Q10 */ /* 96.6% cutoff (~100 dB stop) 10 */
+};
+/*8,24,40,56,80,104,128,160,200,256,320*/
+static double compute_func(float x, const struct FuncDef *func)
+{
+   float y, frac;
+   double interp[4];
+   int ind;
+   y = x*func->oversample;
+   ind = (int)floor(y);
+   frac = (y-ind);
+   /* CSE with handle the repeated powers */
+   interp[3] =  -0.1666666667*frac + 0.1666666667*(frac*frac*frac);
+   interp[2] = frac + 0.5*(frac*frac) - 0.5*(frac*frac*frac);
+   /*interp[2] = 1.f - 0.5f*frac - frac*frac + 0.5f*frac*frac*frac;*/
+   interp[0] = -0.3333333333*frac + 0.5*(frac*frac) - 0.1666666667*(frac*frac*frac);
+   /* Just to make sure we don't have rounding problems */
+   interp[1] = 1.f-interp[3]-interp[2]-interp[0];
+
+   /*sum = frac*accum[1] + (1-frac)*accum[2];*/
+   return interp[0]*func->table[ind] + interp[1]*func->table[ind+1] + interp[2]*func->table[ind+2] + interp[3]*func->table[ind+3];
+}
+
+#if 0
+#include <stdio.h>
+int main(int argc, char **argv)
+{
+   int i;
+   for (i=0;i<256;i++)
+   {
+      printf ("%f\n", compute_func(i/256., KAISER12));
+   }
+   return 0;
+}
+#endif
+
+#ifdef FIXED_POINT
+/* The slow way of computing a sinc for the table. Should improve that some day */
+static spx_word16_t sinc(float cutoff, float x, int N, const struct FuncDef *window_func)
+{
+   /*fprintf (stderr, "%f ", x);*/
+   float xx = x * cutoff;
+   if (fabs(x)<1e-6f)
+      return WORD2INT(32768.*cutoff);
+   else if (fabs(x) > .5f*N)
+      return 0;
+   /*FIXME: Can it really be any slower than this? */
+   return WORD2INT(32768.*cutoff*sin(M_PI*xx)/(M_PI*xx) * compute_func(fabs(2.*x/N), window_func));
+}
+#else
+/* The slow way of computing a sinc for the table. Should improve that some day */
+static spx_word16_t sinc(float cutoff, float x, int N, const struct FuncDef *window_func)
+{
+   /*fprintf (stderr, "%f ", x);*/
+   float xx = x * cutoff;
+   if (fabs(x)<1e-6)
+      return cutoff;
+   else if (fabs(x) > .5*N)
+      return 0;
+   /*FIXME: Can it really be any slower than this? */
+   return cutoff*sin(M_PI*xx)/(M_PI*xx) * compute_func(fabs(2.*x/N), window_func);
+}
+#endif
+
+#ifdef FIXED_POINT
+static void cubic_coef(spx_word16_t x, spx_word16_t interp[4])
+{
+   /* Compute interpolation coefficients. I'm not sure whether this corresponds to cubic interpolation
+   but I know it's MMSE-optimal on a sinc */
+   spx_word16_t x2, x3;
+   x2 = MULT16_16_P15(x, x);
+   x3 = MULT16_16_P15(x, x2);
+   interp[0] = PSHR32(MULT16_16(QCONST16(-0.16667f, 15),x) + MULT16_16(QCONST16(0.16667f, 15),x3),15);
+   interp[1] = EXTRACT16(EXTEND32(x) + SHR32(SUB32(EXTEND32(x2),EXTEND32(x3)),1));
+   interp[3] = PSHR32(MULT16_16(QCONST16(-0.33333f, 15),x) + MULT16_16(QCONST16(.5f,15),x2) - MULT16_16(QCONST16(0.16667f, 15),x3),15);
+   /* Just to make sure we don't have rounding problems */
+   interp[2] = Q15_ONE-interp[0]-interp[1]-interp[3];
+   if (interp[2]<32767)
+      interp[2]+=1;
+}
+#else
+static void cubic_coef(spx_word16_t frac, spx_word16_t interp[4])
+{
+   /* Compute interpolation coefficients. I'm not sure whether this corresponds to cubic interpolation
+   but I know it's MMSE-optimal on a sinc */
+   interp[0] =  -0.16667f*frac + 0.16667f*frac*frac*frac;
+   interp[1] = frac + 0.5f*frac*frac - 0.5f*frac*frac*frac;
+   /*interp[2] = 1.f - 0.5f*frac - frac*frac + 0.5f*frac*frac*frac;*/
+   interp[3] = -0.33333f*frac + 0.5f*frac*frac - 0.16667f*frac*frac*frac;
+   /* Just to make sure we don't have rounding problems */
+   interp[2] = 1.-interp[0]-interp[1]-interp[3];
+}
+#endif
+
+static int resampler_basic_direct_single(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_word16_t *in, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   const int N = st->filt_len;
+   int out_sample = 0;
+   int last_sample = st->last_sample[channel_index];
+   spx_uint32_t samp_frac_num = st->samp_frac_num[channel_index];
+   const spx_word16_t *sinc_table = st->sinc_table;
+   const int out_stride = st->out_stride;
+   const int int_advance = st->int_advance;
+   const int frac_advance = st->frac_advance;
+   const spx_uint32_t den_rate = st->den_rate;
+   spx_word32_t sum;
+
+   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   {
+      const spx_word16_t *sinct = & sinc_table[samp_frac_num*N];
+      const spx_word16_t *iptr = & in[last_sample];
+
+#ifndef OVERRIDE_INNER_PRODUCT_SINGLE
+      int j;
+      sum = 0;
+      for(j=0;j<N;j++) sum += MULT16_16(sinct[j], iptr[j]);
+
+/*    This code is slower on most DSPs which have only 2 accumulators.
+      Plus this this forces truncation to 32 bits and you lose the HW guard bits.
+      I think we can trust the compiler and let it vectorize and/or unroll itself.
+      spx_word32_t accum[4] = {0,0,0,0};
+      for(j=0;j<N;j+=4) {
+        accum[0] += MULT16_16(sinct[j], iptr[j]);
+        accum[1] += MULT16_16(sinct[j+1], iptr[j+1]);
+        accum[2] += MULT16_16(sinct[j+2], iptr[j+2]);
+        accum[3] += MULT16_16(sinct[j+3], iptr[j+3]);
+      }
+      sum = accum[0] + accum[1] + accum[2] + accum[3];
+*/
+      sum = SATURATE32PSHR(sum, 15, 32767);
+#else
+      sum = inner_product_single(sinct, iptr, N);
+#endif
+
+      out[out_stride * out_sample++] = sum;
+      last_sample += int_advance;
+      samp_frac_num += frac_advance;
+      if (samp_frac_num >= den_rate)
+      {
+         samp_frac_num -= den_rate;
+         last_sample++;
+      }
+   }
+
+   st->last_sample[channel_index] = last_sample;
+   st->samp_frac_num[channel_index] = samp_frac_num;
+   return out_sample;
+}
+
+#ifdef FIXED_POINT
+#else
+/* This is the same as the previous function, except with a double-precision accumulator */
+static int resampler_basic_direct_double(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_word16_t *in, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   const int N = st->filt_len;
+   int out_sample = 0;
+   int last_sample = st->last_sample[channel_index];
+   spx_uint32_t samp_frac_num = st->samp_frac_num[channel_index];
+   const spx_word16_t *sinc_table = st->sinc_table;
+   const int out_stride = st->out_stride;
+   const int int_advance = st->int_advance;
+   const int frac_advance = st->frac_advance;
+   const spx_uint32_t den_rate = st->den_rate;
+   double sum;
+
+   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   {
+      const spx_word16_t *sinct = & sinc_table[samp_frac_num*N];
+      const spx_word16_t *iptr = & in[last_sample];
+
+#ifndef OVERRIDE_INNER_PRODUCT_DOUBLE
+      int j;
+      double accum[4] = {0,0,0,0};
+
+      for(j=0;j<N;j+=4) {
+        accum[0] += sinct[j]*iptr[j];
+        accum[1] += sinct[j+1]*iptr[j+1];
+        accum[2] += sinct[j+2]*iptr[j+2];
+        accum[3] += sinct[j+3]*iptr[j+3];
+      }
+      sum = accum[0] + accum[1] + accum[2] + accum[3];
+#else
+      sum = inner_product_double(sinct, iptr, N);
+#endif
+
+      out[out_stride * out_sample++] = PSHR32(sum, 15);
+      last_sample += int_advance;
+      samp_frac_num += frac_advance;
+      if (samp_frac_num >= den_rate)
+      {
+         samp_frac_num -= den_rate;
+         last_sample++;
+      }
+   }
+
+   st->last_sample[channel_index] = last_sample;
+   st->samp_frac_num[channel_index] = samp_frac_num;
+   return out_sample;
+}
+#endif
+
+static int resampler_basic_interpolate_single(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_word16_t *in, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   const int N = st->filt_len;
+   int out_sample = 0;
+   int last_sample = st->last_sample[channel_index];
+   spx_uint32_t samp_frac_num = st->samp_frac_num[channel_index];
+   const int out_stride = st->out_stride;
+   const int int_advance = st->int_advance;
+   const int frac_advance = st->frac_advance;
+   const spx_uint32_t den_rate = st->den_rate;
+   spx_word32_t sum;
+
+   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   {
+      const spx_word16_t *iptr = & in[last_sample];
+
+      const int offset = samp_frac_num*st->oversample/st->den_rate;
+#ifdef FIXED_POINT
+      const spx_word16_t frac = PDIV32(SHL32((samp_frac_num*st->oversample) % st->den_rate,15),st->den_rate);
+#else
+      const spx_word16_t frac = ((float)((samp_frac_num*st->oversample) % st->den_rate))/st->den_rate;
+#endif
+      spx_word16_t interp[4];
+
+
+#ifndef OVERRIDE_INTERPOLATE_PRODUCT_SINGLE
+      int j;
+      spx_word32_t accum[4] = {0,0,0,0};
+
+      for(j=0;j<N;j++) {
+        const spx_word16_t curr_in=iptr[j];
+        accum[0] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset-2]);
+        accum[1] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset-1]);
+        accum[2] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset]);
+        accum[3] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset+1]);
+      }
+
+      cubic_coef(frac, interp);
+      sum = MULT16_32_Q15(interp[0],SHR32(accum[0], 1)) + MULT16_32_Q15(interp[1],SHR32(accum[1], 1)) + MULT16_32_Q15(interp[2],SHR32(accum[2], 1)) + MULT16_32_Q15(interp[3],SHR32(accum[3], 1));
+      sum = SATURATE32PSHR(sum, 15, 32767);
+#else
+      cubic_coef(frac, interp);
+      sum = interpolate_product_single(iptr, st->sinc_table + st->oversample + 4 - offset - 2, N, st->oversample, interp);
+#endif
+
+      out[out_stride * out_sample++] = sum;
+      last_sample += int_advance;
+      samp_frac_num += frac_advance;
+      if (samp_frac_num >= den_rate)
+      {
+         samp_frac_num -= den_rate;
+         last_sample++;
+      }
+   }
+
+   st->last_sample[channel_index] = last_sample;
+   st->samp_frac_num[channel_index] = samp_frac_num;
+   return out_sample;
+}
+
+#ifdef FIXED_POINT
+#else
+/* This is the same as the previous function, except with a double-precision accumulator */
+static int resampler_basic_interpolate_double(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_word16_t *in, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   const int N = st->filt_len;
+   int out_sample = 0;
+   int last_sample = st->last_sample[channel_index];
+   spx_uint32_t samp_frac_num = st->samp_frac_num[channel_index];
+   const int out_stride = st->out_stride;
+   const int int_advance = st->int_advance;
+   const int frac_advance = st->frac_advance;
+   const spx_uint32_t den_rate = st->den_rate;
+   spx_word32_t sum;
+
+   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   {
+      const spx_word16_t *iptr = & in[last_sample];
+
+      const int offset = samp_frac_num*st->oversample/st->den_rate;
+#ifdef FIXED_POINT
+      const spx_word16_t frac = PDIV32(SHL32((samp_frac_num*st->oversample) % st->den_rate,15),st->den_rate);
+#else
+      const spx_word16_t frac = ((float)((samp_frac_num*st->oversample) % st->den_rate))/st->den_rate;
+#endif
+      spx_word16_t interp[4];
+
+
+#ifndef OVERRIDE_INTERPOLATE_PRODUCT_DOUBLE
+      int j;
+      double accum[4] = {0,0,0,0};
+
+      for(j=0;j<N;j++) {
+        const double curr_in=iptr[j];
+        accum[0] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset-2]);
+        accum[1] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset-1]);
+        accum[2] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset]);
+        accum[3] += MULT16_16(curr_in,st->sinc_table[4+(j+1)*st->oversample-offset+1]);
+      }
+
+      cubic_coef(frac, interp);
+      sum = MULT16_32_Q15(interp[0],accum[0]) + MULT16_32_Q15(interp[1],accum[1]) + MULT16_32_Q15(interp[2],accum[2]) + MULT16_32_Q15(interp[3],accum[3]);
+#else
+      cubic_coef(frac, interp);
+      sum = interpolate_product_double(iptr, st->sinc_table + st->oversample + 4 - offset - 2, N, st->oversample, interp);
+#endif
+
+      out[out_stride * out_sample++] = PSHR32(sum,15);
+      last_sample += int_advance;
+      samp_frac_num += frac_advance;
+      if (samp_frac_num >= den_rate)
+      {
+         samp_frac_num -= den_rate;
+         last_sample++;
+      }
+   }
+
+   st->last_sample[channel_index] = last_sample;
+   st->samp_frac_num[channel_index] = samp_frac_num;
+   return out_sample;
+}
+#endif
+
+/* This resampler is used to produce zero output in situations where memory
+   for the filter could not be allocated.  The expected numbers of input and
+   output samples are still processed so that callers failing to check error
+   codes are not surprised, possibly getting into infinite loops. */
+static int resampler_basic_zero(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_word16_t *in, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   int out_sample = 0;
+   int last_sample = st->last_sample[channel_index];
+   spx_uint32_t samp_frac_num = st->samp_frac_num[channel_index];
+   const int out_stride = st->out_stride;
+   const int int_advance = st->int_advance;
+   const int frac_advance = st->frac_advance;
+   const spx_uint32_t den_rate = st->den_rate;
+
+   (void)in;
+   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   {
+      out[out_stride * out_sample++] = 0;
+      last_sample += int_advance;
+      samp_frac_num += frac_advance;
+      if (samp_frac_num >= den_rate)
+      {
+         samp_frac_num -= den_rate;
+         last_sample++;
+      }
+   }
+
+   st->last_sample[channel_index] = last_sample;
+   st->samp_frac_num[channel_index] = samp_frac_num;
+   return out_sample;
+}
+
+static int multiply_frac(spx_uint32_t *result, spx_uint32_t value, spx_uint32_t num, spx_uint32_t den)
+{
+   spx_uint32_t major = value / den;
+   spx_uint32_t remain = value % den;
+   /* TODO: Could use 64 bits operation to check for overflow. But only guaranteed in C99+ */
+   if (remain > UINT32_MAX / num || major > UINT32_MAX / num
+       || major * num > UINT32_MAX - remain * num / den)
+      return RESAMPLER_ERR_OVERFLOW;
+   *result = remain * num / den + major * num;
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+static int update_filter(SpeexResamplerState *st)
+{
+   spx_uint32_t old_length = st->filt_len;
+   spx_uint32_t old_alloc_size = st->mem_alloc_size;
+   int use_direct;
+   spx_uint32_t min_sinc_table_length;
+   spx_uint32_t min_alloc_size;
+
+   st->int_advance = st->num_rate/st->den_rate;
+   st->frac_advance = st->num_rate%st->den_rate;
+   st->oversample = quality_map[st->quality].oversample;
+   st->filt_len = quality_map[st->quality].base_length;
+
+   if (st->num_rate > st->den_rate)
+   {
+      /* down-sampling */
+      st->cutoff = quality_map[st->quality].downsample_bandwidth * st->den_rate / st->num_rate;
+      if (multiply_frac(&st->filt_len,st->filt_len,st->num_rate,st->den_rate) != RESAMPLER_ERR_SUCCESS)
+         goto fail;
+      /* Round up to make sure we have a multiple of 8 for SSE */
+      st->filt_len = ((st->filt_len-1)&(~0x7))+8;
+      if (2*st->den_rate < st->num_rate)
+         st->oversample >>= 1;
+      if (4*st->den_rate < st->num_rate)
+         st->oversample >>= 1;
+      if (8*st->den_rate < st->num_rate)
+         st->oversample >>= 1;
+      if (16*st->den_rate < st->num_rate)
+         st->oversample >>= 1;
+      if (st->oversample < 1)
+         st->oversample = 1;
+   } else {
+      /* up-sampling */
+      st->cutoff = quality_map[st->quality].upsample_bandwidth;
+   }
+
+#ifdef RESAMPLE_FULL_SINC_TABLE
+   use_direct = 1;
+   if (INT_MAX/sizeof(spx_word16_t)/st->den_rate < st->filt_len)
+      goto fail;
+#else
+   /* Choose the resampling type that requires the least amount of memory */
+   use_direct = st->filt_len*st->den_rate <= st->filt_len*st->oversample+8
+                && INT_MAX/sizeof(spx_word16_t)/st->den_rate >= st->filt_len;
+#endif
+   if (use_direct)
+   {
+      min_sinc_table_length = st->filt_len*st->den_rate;
+   } else {
+      if ((INT_MAX/sizeof(spx_word16_t)-8)/st->oversample < st->filt_len)
+         goto fail;
+
+      min_sinc_table_length = st->filt_len*st->oversample+8;
+   }
+   if (st->sinc_table_length < min_sinc_table_length)
+   {
+      spx_word16_t *sinc_table = (spx_word16_t *)speex_realloc(st->sinc_table,min_sinc_table_length*sizeof(spx_word16_t));
+      if (!sinc_table)
+         goto fail;
+
+      st->sinc_table = sinc_table;
+      st->sinc_table_length = min_sinc_table_length;
+   }
+   if (use_direct)
+   {
+      spx_uint32_t i;
+      for (i=0;i<st->den_rate;i++)
+      {
+         spx_int32_t j;
+         for (j=0;j<st->filt_len;j++)
+         {
+            st->sinc_table[i*st->filt_len+j] = sinc(st->cutoff,((j-(spx_int32_t)st->filt_len/2+1)-((float)i)/st->den_rate), st->filt_len, quality_map[st->quality].window_func);
+         }
+      }
+#ifdef FIXED_POINT
+      st->resampler_ptr = resampler_basic_direct_single;
+#else
+      if (st->quality>8)
+         st->resampler_ptr = resampler_basic_direct_double;
+      else
+         st->resampler_ptr = resampler_basic_direct_single;
+#endif
+      /*fprintf (stderr, "resampler uses direct sinc table and normalised cutoff %f\n", cutoff);*/
+   } else {
+      spx_int32_t i;
+      for (i=-4;i<(spx_int32_t)(st->oversample*st->filt_len+4);i++)
+         st->sinc_table[i+4] = sinc(st->cutoff,(i/(float)st->oversample - st->filt_len/2), st->filt_len, quality_map[st->quality].window_func);
+#ifdef FIXED_POINT
+      st->resampler_ptr = resampler_basic_interpolate_single;
+#else
+      if (st->quality>8)
+         st->resampler_ptr = resampler_basic_interpolate_double;
+      else
+         st->resampler_ptr = resampler_basic_interpolate_single;
+#endif
+      /*fprintf (stderr, "resampler uses interpolated sinc table and normalised cutoff %f\n", cutoff);*/
+   }
+
+   /* Here's the place where we update the filter memory to take into account
+      the change in filter length. It's probably the messiest part of the code
+      due to handling of lots of corner cases. */
+
+   /* Adding buffer_size to filt_len won't overflow here because filt_len
+      could be multiplied by sizeof(spx_word16_t) above. */
+   min_alloc_size = st->filt_len-1 + st->buffer_size;
+   if (min_alloc_size > st->mem_alloc_size)
+   {
+      spx_word16_t *mem;
+      if (INT_MAX/sizeof(spx_word16_t)/st->nb_channels < min_alloc_size)
+          goto fail;
+      else if (!(mem = (spx_word16_t*)speex_realloc(st->mem, st->nb_channels*min_alloc_size * sizeof(*mem))))
+          goto fail;
+
+      st->mem = mem;
+      st->mem_alloc_size = min_alloc_size;
+   }
+   if (!st->started)
+   {
+      spx_uint32_t i;
+      for (i=0;i<st->nb_channels*st->mem_alloc_size;i++)
+         st->mem[i] = 0;
+      /*speex_warning("reinit filter");*/
+   } else if (st->filt_len > old_length)
+   {
+      spx_uint32_t i;
+      /* Increase the filter length */
+      /*speex_warning("increase filter size");*/
+      for (i=st->nb_channels;i--;)
+      {
+         spx_uint32_t j;
+         spx_uint32_t olen = old_length;
+         /*if (st->magic_samples[i])*/
+         {
+            /* Try and remove the magic samples as if nothing had happened */
+
+            /* FIXME: This is wrong but for now we need it to avoid going over the array bounds */
+            olen = old_length + 2*st->magic_samples[i];
+            for (j=old_length-1+st->magic_samples[i];j--;)
+               st->mem[i*st->mem_alloc_size+j+st->magic_samples[i]] = st->mem[i*old_alloc_size+j];
+            for (j=0;j<st->magic_samples[i];j++)
+               st->mem[i*st->mem_alloc_size+j] = 0;
+            st->magic_samples[i] = 0;
+         }
+         if (st->filt_len > olen)
+         {
+            /* If the new filter length is still bigger than the "augmented" length */
+            /* Copy data going backward */
+            for (j=0;j<olen-1;j++)
+               st->mem[i*st->mem_alloc_size+(st->filt_len-2-j)] = st->mem[i*st->mem_alloc_size+(olen-2-j)];
+            /* Then put zeros for lack of anything better */
+            for (;j<st->filt_len-1;j++)
+               st->mem[i*st->mem_alloc_size+(st->filt_len-2-j)] = 0;
+            /* Adjust last_sample */
+            st->last_sample[i] += (st->filt_len - olen)/2;
+         } else {
+            /* Put back some of the magic! */
+            st->magic_samples[i] = (olen - st->filt_len)/2;
+            for (j=0;j<st->filt_len-1+st->magic_samples[i];j++)
+               st->mem[i*st->mem_alloc_size+j] = st->mem[i*st->mem_alloc_size+j+st->magic_samples[i]];
+         }
+      }
+   } else if (st->filt_len < old_length)
+   {
+      spx_uint32_t i;
+      /* Reduce filter length, this a bit tricky. We need to store some of the memory as "magic"
+         samples so they can be used directly as input the next time(s) */
+      for (i=0;i<st->nb_channels;i++)
+      {
+         spx_uint32_t j;
+         spx_uint32_t old_magic = st->magic_samples[i];
+         st->magic_samples[i] = (old_length - st->filt_len)/2;
+         /* We must copy some of the memory that's no longer used */
+         /* Copy data going backward */
+         for (j=0;j<st->filt_len-1+st->magic_samples[i]+old_magic;j++)
+            st->mem[i*st->mem_alloc_size+j] = st->mem[i*st->mem_alloc_size+j+st->magic_samples[i]];
+         st->magic_samples[i] += old_magic;
+      }
+   }
+   return RESAMPLER_ERR_SUCCESS;
+
+fail:
+   st->resampler_ptr = resampler_basic_zero;
+   /* st->mem may still contain consumed input samples for the filter.
+      Restore filt_len so that filt_len - 1 still points to the position after
+      the last of these samples. */
+   st->filt_len = old_length;
+   return RESAMPLER_ERR_ALLOC_FAILED;
+}
+
+EXPORT SpeexResamplerState *speex_resampler_init(spx_uint32_t nb_channels, spx_uint32_t in_rate, spx_uint32_t out_rate, int quality, int *err)
+{
+   return speex_resampler_init_frac(nb_channels, in_rate, out_rate, in_rate, out_rate, quality, err);
+}
+
+EXPORT SpeexResamplerState *speex_resampler_init_frac(spx_uint32_t nb_channels, spx_uint32_t ratio_num, spx_uint32_t ratio_den, spx_uint32_t in_rate, spx_uint32_t out_rate, int quality, int *err)
+{
+   SpeexResamplerState *st;
+   int filter_err;
+
+   if (nb_channels == 0 || ratio_num == 0 || ratio_den == 0 || quality > 10 || quality < 0)
+   {
+      if (err)
+         *err = RESAMPLER_ERR_INVALID_ARG;
+      return NULL;
+   }
+   st = (SpeexResamplerState *)speex_alloc(sizeof(SpeexResamplerState));
+   if (!st)
+   {
+      if (err)
+         *err = RESAMPLER_ERR_ALLOC_FAILED;
+      return NULL;
+   }
+   st->initialised = 0;
+   st->started = 0;
+   st->in_rate = 0;
+   st->out_rate = 0;
+   st->num_rate = 0;
+   st->den_rate = 0;
+   st->quality = -1;
+   st->sinc_table_length = 0;
+   st->mem_alloc_size = 0;
+   st->filt_len = 0;
+   st->mem = 0;
+   st->resampler_ptr = 0;
+
+   st->cutoff = 1.f;
+   st->nb_channels = nb_channels;
+   st->in_stride = 1;
+   st->out_stride = 1;
+
+   st->buffer_size = 160;
+
+   /* Per channel data */
+   if (!(st->last_sample = (spx_int32_t*)speex_alloc(nb_channels*sizeof(spx_int32_t))))
+      goto fail;
+   if (!(st->magic_samples = (spx_uint32_t*)speex_alloc(nb_channels*sizeof(spx_uint32_t))))
+      goto fail;
+   if (!(st->samp_frac_num = (spx_uint32_t*)speex_alloc(nb_channels*sizeof(spx_uint32_t))))
+      goto fail;
+
+   speex_resampler_set_quality(st, quality);
+   speex_resampler_set_rate_frac(st, ratio_num, ratio_den, in_rate, out_rate);
+
+   filter_err = update_filter(st);
+   if (filter_err == RESAMPLER_ERR_SUCCESS)
+   {
+      st->initialised = 1;
+   } else {
+      speex_resampler_destroy(st);
+      st = NULL;
+   }
+   if (err)
+      *err = filter_err;
+
+   return st;
+
+fail:
+   if (err)
+      *err = RESAMPLER_ERR_ALLOC_FAILED;
+   speex_resampler_destroy(st);
+   return NULL;
+}
+
+EXPORT void speex_resampler_destroy(SpeexResamplerState *st)
+{
+   speex_free(st->mem);
+   speex_free(st->sinc_table);
+   speex_free(st->last_sample);
+   speex_free(st->magic_samples);
+   speex_free(st->samp_frac_num);
+   speex_free(st);
+}
+
+static int speex_resampler_process_native(SpeexResamplerState *st, spx_uint32_t channel_index, spx_uint32_t *in_len, spx_word16_t *out, spx_uint32_t *out_len)
+{
+   int j=0;
+   const int N = st->filt_len;
+   int out_sample = 0;
+   spx_word16_t *mem = st->mem + channel_index * st->mem_alloc_size;
+   spx_uint32_t ilen;
+
+   st->started = 1;
+
+   /* Call the right resampler through the function ptr */
+   out_sample = st->resampler_ptr(st, channel_index, mem, in_len, out, out_len);
+
+   if (st->last_sample[channel_index] < (spx_int32_t)*in_len)
+      *in_len = st->last_sample[channel_index];
+   *out_len = out_sample;
+   st->last_sample[channel_index] -= *in_len;
+
+   ilen = *in_len;
+
+   for(j=0;j<N-1;++j)
+     mem[j] = mem[j+ilen];
+
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+static int speex_resampler_magic(SpeexResamplerState *st, spx_uint32_t channel_index, spx_word16_t **out, spx_uint32_t out_len) {
+   spx_uint32_t tmp_in_len = st->magic_samples[channel_index];
+   spx_word16_t *mem = st->mem + channel_index * st->mem_alloc_size;
+   const int N = st->filt_len;
+
+   speex_resampler_process_native(st, channel_index, &tmp_in_len, *out, &out_len);
+
+   st->magic_samples[channel_index] -= tmp_in_len;
+
+   /* If we couldn't process all "magic" input samples, save the rest for next time */
+   if (st->magic_samples[channel_index])
+   {
+      spx_uint32_t i;
+      for (i=0;i<st->magic_samples[channel_index];i++)
+         mem[N-1+i]=mem[N-1+i+tmp_in_len];
+   }
+   *out += out_len*st->out_stride;
+   return out_len;
+}
+
+#ifdef FIXED_POINT
+EXPORT int speex_resampler_process_int(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_int16_t *in, spx_uint32_t *in_len, spx_int16_t *out, spx_uint32_t *out_len)
+#else
+EXPORT int speex_resampler_process_float(SpeexResamplerState *st, spx_uint32_t channel_index, const float *in, spx_uint32_t *in_len, float *out, spx_uint32_t *out_len)
+#endif
+{
+   int j;
+   spx_uint32_t ilen = *in_len;
+   spx_uint32_t olen = *out_len;
+   spx_word16_t *x = st->mem + channel_index * st->mem_alloc_size;
+   const int filt_offs = st->filt_len - 1;
+   const spx_uint32_t xlen = st->mem_alloc_size - filt_offs;
+   const int istride = st->in_stride;
+
+   if (st->magic_samples[channel_index])
+      olen -= speex_resampler_magic(st, channel_index, &out, olen);
+   if (! st->magic_samples[channel_index]) {
+      while (ilen && olen) {
+        spx_uint32_t ichunk = (ilen > xlen) ? xlen : ilen;
+        spx_uint32_t ochunk = olen;
+
+        if (in) {
+           for(j=0;j<ichunk;++j)
+              x[j+filt_offs]=in[j*istride];
+        } else {
+          for(j=0;j<ichunk;++j)
+            x[j+filt_offs]=0;
+        }
+        speex_resampler_process_native(st, channel_index, &ichunk, out, &ochunk);
+        ilen -= ichunk;
+        olen -= ochunk;
+        out += ochunk * st->out_stride;
+        if (in)
+           in += ichunk * istride;
+      }
+   }
+   *in_len -= ilen;
+   *out_len -= olen;
+   return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
+}
+
+#ifdef FIXED_POINT
+EXPORT int speex_resampler_process_float(SpeexResamplerState *st, spx_uint32_t channel_index, const float *in, spx_uint32_t *in_len, float *out, spx_uint32_t *out_len)
+#else
+EXPORT int speex_resampler_process_int(SpeexResamplerState *st, spx_uint32_t channel_index, const spx_int16_t *in, spx_uint32_t *in_len, spx_int16_t *out, spx_uint32_t *out_len)
+#endif
+{
+   int j;
+   const int istride_save = st->in_stride;
+   const int ostride_save = st->out_stride;
+   spx_uint32_t ilen = *in_len;
+   spx_uint32_t olen = *out_len;
+   spx_word16_t *x = st->mem + channel_index * st->mem_alloc_size;
+   const spx_uint32_t xlen = st->mem_alloc_size - (st->filt_len - 1);
+#ifdef VAR_ARRAYS
+   const unsigned int ylen = (olen < FIXED_STACK_ALLOC) ? olen : FIXED_STACK_ALLOC;
+   spx_word16_t ystack[ylen];
+#else
+   const unsigned int ylen = FIXED_STACK_ALLOC;
+   spx_word16_t ystack[FIXED_STACK_ALLOC];
+#endif
+
+   st->out_stride = 1;
+
+   while (ilen && olen) {
+     spx_word16_t *y = ystack;
+     spx_uint32_t ichunk = (ilen > xlen) ? xlen : ilen;
+     spx_uint32_t ochunk = (olen > ylen) ? ylen : olen;
+     spx_uint32_t omagic = 0;
+
+     if (st->magic_samples[channel_index]) {
+       omagic = speex_resampler_magic(st, channel_index, &y, ochunk);
+       ochunk -= omagic;
+       olen -= omagic;
+     }
+     if (! st->magic_samples[channel_index]) {
+       if (in) {
+         for(j=0;j<ichunk;++j)
+#ifdef FIXED_POINT
+           x[j+st->filt_len-1]=WORD2INT(in[j*istride_save]);
+#else
+           x[j+st->filt_len-1]=in[j*istride_save];
+#endif
+       } else {
+         for(j=0;j<ichunk;++j)
+           x[j+st->filt_len-1]=0;
+       }
+
+       speex_resampler_process_native(st, channel_index, &ichunk, y, &ochunk);
+     } else {
+       ichunk = 0;
+       ochunk = 0;
+     }
+
+     for (j=0;j<ochunk+omagic;++j)
+#ifdef FIXED_POINT
+        out[j*ostride_save] = ystack[j];
+#else
+        out[j*ostride_save] = WORD2INT(ystack[j]);
+#endif
+
+     ilen -= ichunk;
+     olen -= ochunk;
+     out += (ochunk+omagic) * ostride_save;
+     if (in)
+       in += ichunk * istride_save;
+   }
+   st->out_stride = ostride_save;
+   *in_len -= ilen;
+   *out_len -= olen;
+
+   return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT int speex_resampler_process_interleaved_float(SpeexResamplerState *st, const float *in, spx_uint32_t *in_len, float *out, spx_uint32_t *out_len)
+{
+   spx_uint32_t i;
+   int istride_save, ostride_save;
+   spx_uint32_t bak_out_len = *out_len;
+   spx_uint32_t bak_in_len = *in_len;
+   istride_save = st->in_stride;
+   ostride_save = st->out_stride;
+   st->in_stride = st->out_stride = st->nb_channels;
+   for (i=0;i<st->nb_channels;i++)
+   {
+      *out_len = bak_out_len;
+      *in_len = bak_in_len;
+      if (in != NULL)
+         speex_resampler_process_float(st, i, in+i, in_len, out+i, out_len);
+      else
+         speex_resampler_process_float(st, i, NULL, in_len, out+i, out_len);
+   }
+   st->in_stride = istride_save;
+   st->out_stride = ostride_save;
+   return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT int speex_resampler_process_interleaved_int(SpeexResamplerState *st, const spx_int16_t *in, spx_uint32_t *in_len, spx_int16_t *out, spx_uint32_t *out_len)
+{
+   spx_uint32_t i;
+   int istride_save, ostride_save;
+   spx_uint32_t bak_out_len = *out_len;
+   spx_uint32_t bak_in_len = *in_len;
+   istride_save = st->in_stride;
+   ostride_save = st->out_stride;
+   st->in_stride = st->out_stride = st->nb_channels;
+   for (i=0;i<st->nb_channels;i++)
+   {
+      *out_len = bak_out_len;
+      *in_len = bak_in_len;
+      if (in != NULL)
+         speex_resampler_process_int(st, i, in+i, in_len, out+i, out_len);
+      else
+         speex_resampler_process_int(st, i, NULL, in_len, out+i, out_len);
+   }
+   st->in_stride = istride_save;
+   st->out_stride = ostride_save;
+   return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT int speex_resampler_set_rate(SpeexResamplerState *st, spx_uint32_t in_rate, spx_uint32_t out_rate)
+{
+   return speex_resampler_set_rate_frac(st, in_rate, out_rate, in_rate, out_rate);
+}
+
+EXPORT void speex_resampler_get_rate(SpeexResamplerState *st, spx_uint32_t *in_rate, spx_uint32_t *out_rate)
+{
+   *in_rate = st->in_rate;
+   *out_rate = st->out_rate;
+}
+
+static inline spx_uint32_t compute_gcd(spx_uint32_t a, spx_uint32_t b)
+{
+   while (b != 0)
+   {
+      spx_uint32_t temp = a;
+
+      a = b;
+      b = temp % b;
+   }
+   return a;
+}
+
+EXPORT int speex_resampler_set_rate_frac(SpeexResamplerState *st, spx_uint32_t ratio_num, spx_uint32_t ratio_den, spx_uint32_t in_rate, spx_uint32_t out_rate)
+{
+   spx_uint32_t fact;
+   spx_uint32_t old_den;
+   spx_uint32_t i;
+
+   if (ratio_num == 0 || ratio_den == 0)
+      return RESAMPLER_ERR_INVALID_ARG;
+
+   if (st->in_rate == in_rate && st->out_rate == out_rate && st->num_rate == ratio_num && st->den_rate == ratio_den)
+      return RESAMPLER_ERR_SUCCESS;
+
+   old_den = st->den_rate;
+   st->in_rate = in_rate;
+   st->out_rate = out_rate;
+   st->num_rate = ratio_num;
+   st->den_rate = ratio_den;
+
+   fact = compute_gcd(st->num_rate, st->den_rate);
+
+   st->num_rate /= fact;
+   st->den_rate /= fact;
+
+   if (old_den > 0)
+   {
+      for (i=0;i<st->nb_channels;i++)
+      {
+         if (multiply_frac(&st->samp_frac_num[i],st->samp_frac_num[i],st->den_rate,old_den) != RESAMPLER_ERR_SUCCESS)
+            return RESAMPLER_ERR_OVERFLOW;
+         /* Safety net */
+         if (st->samp_frac_num[i] >= st->den_rate)
+            st->samp_frac_num[i] = st->den_rate-1;
+      }
+   }
+
+   if (st->initialised)
+      return update_filter(st);
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT void speex_resampler_get_ratio(SpeexResamplerState *st, spx_uint32_t *ratio_num, spx_uint32_t *ratio_den)
+{
+   *ratio_num = st->num_rate;
+   *ratio_den = st->den_rate;
+}
+
+EXPORT int speex_resampler_set_quality(SpeexResamplerState *st, int quality)
+{
+   if (quality > 10 || quality < 0)
+      return RESAMPLER_ERR_INVALID_ARG;
+   if (st->quality == quality)
+      return RESAMPLER_ERR_SUCCESS;
+   st->quality = quality;
+   if (st->initialised)
+      return update_filter(st);
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT void speex_resampler_get_quality(SpeexResamplerState *st, int *quality)
+{
+   *quality = st->quality;
+}
+
+EXPORT void speex_resampler_set_input_stride(SpeexResamplerState *st, spx_uint32_t stride)
+{
+   st->in_stride = stride;
+}
+
+EXPORT void speex_resampler_get_input_stride(SpeexResamplerState *st, spx_uint32_t *stride)
+{
+   *stride = st->in_stride;
+}
+
+EXPORT void speex_resampler_set_output_stride(SpeexResamplerState *st, spx_uint32_t stride)
+{
+   st->out_stride = stride;
+}
+
+EXPORT void speex_resampler_get_output_stride(SpeexResamplerState *st, spx_uint32_t *stride)
+{
+   *stride = st->out_stride;
+}
+
+EXPORT int speex_resampler_get_input_latency(SpeexResamplerState *st)
+{
+  return st->filt_len / 2;
+}
+
+EXPORT int speex_resampler_get_output_latency(SpeexResamplerState *st)
+{
+  return ((st->filt_len / 2) * st->den_rate + (st->num_rate >> 1)) / st->num_rate;
+}
+
+EXPORT int speex_resampler_skip_zeros(SpeexResamplerState *st)
+{
+   spx_uint32_t i;
+   for (i=0;i<st->nb_channels;i++)
+      st->last_sample[i] = st->filt_len/2;
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT int speex_resampler_reset_mem(SpeexResamplerState *st)
+{
+   spx_uint32_t i;
+   for (i=0;i<st->nb_channels;i++)
+   {
+      st->last_sample[i] = 0;
+      st->magic_samples[i] = 0;
+      st->samp_frac_num[i] = 0;
+   }
+   for (i=0;i<st->nb_channels*(st->filt_len-1);i++)
+      st->mem[i] = 0;
+   return RESAMPLER_ERR_SUCCESS;
+}
+
+EXPORT const char *speex_resampler_strerror(int err)
+{
+   switch (err)
+   {
+      case RESAMPLER_ERR_SUCCESS:
+         return "Success.";
+      case RESAMPLER_ERR_ALLOC_FAILED:
+         return "Memory allocation failed.";
+      case RESAMPLER_ERR_BAD_STATE:
+         return "Bad resampler state.";
+      case RESAMPLER_ERR_INVALID_ARG:
+         return "Invalid argument.";
+      case RESAMPLER_ERR_PTR_OVERLAP:
+         return "Input and output buffers overlap.";
+      default:
+         return "Unknown error. Bad error code or strange version mismatch.";
+   }
+}
+/* Copyright (C) 2007 Jean-Marc Valin
+
+   File: speex_resampler.h
+   Resampling code
+
+   The design goals of this code are:
+      - Very fast algorithm
+      - Low memory requirement
+      - Good *perceptual* quality (and not best SNR)
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are
+   met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+   IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+   OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+   INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+   STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+   ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+   POSSIBILITY OF SUCH DAMAGE.
+*/
+
+
+#ifndef SPEEX_RESAMPLER_H
+#define SPEEX_RESAMPLER_H
+
+#ifdef OUTSIDE_SPEEX
+
+/********* WARNING: MENTAL SANITY ENDS HERE *************/
+
+/* If the resampler is defined outside of Speex, we change the symbol names so that
+   there won't be any clash if linking with Speex later on. */
+
+/* #define RANDOM_PREFIX your software name here */
+#ifndef RANDOM_PREFIX
+#error "Please define RANDOM_PREFIX (above) to something specific to your project to prevent symbol name clashes"
+#endif
+
+#define CAT_PREFIX2(a,b) a ## b
+#define CAT_PREFIX(a,b) CAT_PREFIX2(a, b)
+
+#define speex_resampler_init CAT_PREFIX(RANDOM_PREFIX,_resampler_init)
+#define speex_resampler_init_frac CAT_PREFIX(RANDOM_PREFIX,_resampler_init_frac)
+#define speex_resampler_destroy CAT_PREFIX(RANDOM_PREFIX,_resampler_destroy)
+#define speex_resampler_process_float CAT_PREFIX(RANDOM_PREFIX,_resampler_process_float)
+#define speex_resampler_process_int CAT_PREFIX(RANDOM_PREFIX,_resampler_process_int)
+#define speex_resampler_process_interleaved_float CAT_PREFIX(RANDOM_PREFIX,_resampler_process_interleaved_float)
+#define speex_resampler_process_interleaved_int CAT_PREFIX(RANDOM_PREFIX,_resampler_process_interleaved_int)
+#define speex_resampler_set_rate CAT_PREFIX(RANDOM_PREFIX,_resampler_set_rate)
+#define speex_resampler_get_rate CAT_PREFIX(RANDOM_PREFIX,_resampler_get_rate)
+#define speex_resampler_set_rate_frac CAT_PREFIX(RANDOM_PREFIX,_resampler_set_rate_frac)
+#define speex_resampler_get_ratio CAT_PREFIX(RANDOM_PREFIX,_resampler_get_ratio)
+#define speex_resampler_set_quality CAT_PREFIX(RANDOM_PREFIX,_resampler_set_quality)
+#define speex_resampler_get_quality CAT_PREFIX(RANDOM_PREFIX,_resampler_get_quality)
+#define speex_resampler_set_input_stride CAT_PREFIX(RANDOM_PREFIX,_resampler_set_input_stride)
+#define speex_resampler_get_input_stride CAT_PREFIX(RANDOM_PREFIX,_resampler_get_input_stride)
+#define speex_resampler_set_output_stride CAT_PREFIX(RANDOM_PREFIX,_resampler_set_output_stride)
+#define speex_resampler_get_output_stride CAT_PREFIX(RANDOM_PREFIX,_resampler_get_output_stride)
+#define speex_resampler_get_input_latency CAT_PREFIX(RANDOM_PREFIX,_resampler_get_input_latency)
+#define speex_resampler_get_output_latency CAT_PREFIX(RANDOM_PREFIX,_resampler_get_output_latency)
+#define speex_resampler_skip_zeros CAT_PREFIX(RANDOM_PREFIX,_resampler_skip_zeros)
+#define speex_resampler_reset_mem CAT_PREFIX(RANDOM_PREFIX,_resampler_reset_mem)
+#define speex_resampler_strerror CAT_PREFIX(RANDOM_PREFIX,_resampler_strerror)
+
+#define spx_int16_t short
+#define spx_int32_t int
+#define spx_uint16_t unsigned short
+#define spx_uint32_t unsigned int
+
+#else /* OUTSIDE_SPEEX */
+
+#include "speexdsp_types.h"
+
+#endif /* OUTSIDE_SPEEX */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SPEEX_RESAMPLER_QUALITY_MAX 10
+#define SPEEX_RESAMPLER_QUALITY_MIN 0
+#define SPEEX_RESAMPLER_QUALITY_DEFAULT 4
+#define SPEEX_RESAMPLER_QUALITY_VOIP 3
+#define SPEEX_RESAMPLER_QUALITY_DESKTOP 5
+
+enum {
+   RESAMPLER_ERR_SUCCESS         = 0,
+   RESAMPLER_ERR_ALLOC_FAILED    = 1,
+   RESAMPLER_ERR_BAD_STATE       = 2,
+   RESAMPLER_ERR_INVALID_ARG     = 3,
+   RESAMPLER_ERR_PTR_OVERLAP     = 4,
+   RESAMPLER_ERR_OVERFLOW        = 5,
+
+   RESAMPLER_ERR_MAX_ERROR
+};
+
+struct SpeexResamplerState_;
+typedef struct SpeexResamplerState_ SpeexResamplerState;
+
+/** Create a new resampler with integer input and output rates.
+ * @param nb_channels Number of channels to be processed
+ * @param in_rate Input sampling rate (integer number of Hz).
+ * @param out_rate Output sampling rate (integer number of Hz).
+ * @param quality Resampling quality between 0 and 10, where 0 has poor quality
+ * and 10 has very high quality.
+ * @return Newly created resampler state
+ * @retval NULL Error: not enough memory
+ */
+SpeexResamplerState *speex_resampler_init(spx_uint32_t nb_channels,
+                                          spx_uint32_t in_rate,
+                                          spx_uint32_t out_rate,
+                                          int quality,
+                                          int *err);
+
+/** Create a new resampler with fractional input/output rates. The sampling
+ * rate ratio is an arbitrary rational number with both the numerator and
+ * denominator being 32-bit integers.
+ * @param nb_channels Number of channels to be processed
+ * @param ratio_num Numerator of the sampling rate ratio
+ * @param ratio_den Denominator of the sampling rate ratio
+ * @param in_rate Input sampling rate rounded to the nearest integer (in Hz).
+ * @param out_rate Output sampling rate rounded to the nearest integer (in Hz).
+ * @param quality Resampling quality between 0 and 10, where 0 has poor quality
+ * and 10 has very high quality.
+ * @return Newly created resampler state
+ * @retval NULL Error: not enough memory
+ */
+SpeexResamplerState *speex_resampler_init_frac(spx_uint32_t nb_channels,
+                                               spx_uint32_t ratio_num,
+                                               spx_uint32_t ratio_den,
+                                               spx_uint32_t in_rate,
+                                               spx_uint32_t out_rate,
+                                               int quality,
+                                               int *err);
+
+/** Destroy a resampler state.
+ * @param st Resampler state
+ */
+void speex_resampler_destroy(SpeexResamplerState *st);
+
+/** Resample a float array. The input and output buffers must *not* overlap.
+ * @param st Resampler state
+ * @param channel_index Index of the channel to process for the multi-channel
+ * base (0 otherwise)
+ * @param in Input buffer
+ * @param in_len Number of input samples in the input buffer. Returns the
+ * number of samples processed
+ * @param out Output buffer
+ * @param out_len Size of the output buffer. Returns the number of samples written
+ */
+int speex_resampler_process_float(SpeexResamplerState *st,
+                                   spx_uint32_t channel_index,
+                                   const float *in,
+                                   spx_uint32_t *in_len,
+                                   float *out,
+                                   spx_uint32_t *out_len);
+
+/** Resample an int array. The input and output buffers must *not* overlap.
+ * @param st Resampler state
+ * @param channel_index Index of the channel to process for the multi-channel
+ * base (0 otherwise)
+ * @param in Input buffer
+ * @param in_len Number of input samples in the input buffer. Returns the number
+ * of samples processed
+ * @param out Output buffer
+ * @param out_len Size of the output buffer. Returns the number of samples written
+ */
+int speex_resampler_process_int(SpeexResamplerState *st,
+                                 spx_uint32_t channel_index,
+                                 const spx_int16_t *in,
+                                 spx_uint32_t *in_len,
+                                 spx_int16_t *out,
+                                 spx_uint32_t *out_len);
+
+/** Resample an interleaved float array. The input and output buffers must *not* overlap.
+ * @param st Resampler state
+ * @param in Input buffer
+ * @param in_len Number of input samples in the input buffer. Returns the number
+ * of samples processed. This is all per-channel.
+ * @param out Output buffer
+ * @param out_len Size of the output buffer. Returns the number of samples written.
+ * This is all per-channel.
+ */
+int speex_resampler_process_interleaved_float(SpeexResamplerState *st,
+                                               const float *in,
+                                               spx_uint32_t *in_len,
+                                               float *out,
+                                               spx_uint32_t *out_len);
+
+/** Resample an interleaved int array. The input and output buffers must *not* overlap.
+ * @param st Resampler state
+ * @param in Input buffer
+ * @param in_len Number of input samples in the input buffer. Returns the number
+ * of samples processed. This is all per-channel.
+ * @param out Output buffer
+ * @param out_len Size of the output buffer. Returns the number of samples written.
+ * This is all per-channel.
+ */
+int speex_resampler_process_interleaved_int(SpeexResamplerState *st,
+                                             const spx_int16_t *in,
+                                             spx_uint32_t *in_len,
+                                             spx_int16_t *out,
+                                             spx_uint32_t *out_len);
+
+/** Set (change) the input/output sampling rates (integer value).
+ * @param st Resampler state
+ * @param in_rate Input sampling rate (integer number of Hz).
+ * @param out_rate Output sampling rate (integer number of Hz).
+ */
+int speex_resampler_set_rate(SpeexResamplerState *st,
+                              spx_uint32_t in_rate,
+                              spx_uint32_t out_rate);
+
+/** Get the current input/output sampling rates (integer value).
+ * @param st Resampler state
+ * @param in_rate Input sampling rate (integer number of Hz) copied.
+ * @param out_rate Output sampling rate (integer number of Hz) copied.
+ */
+void speex_resampler_get_rate(SpeexResamplerState *st,
+                              spx_uint32_t *in_rate,
+                              spx_uint32_t *out_rate);
+
+/** Set (change) the input/output sampling rates and resampling ratio
+ * (fractional values in Hz supported).
+ * @param st Resampler state
+ * @param ratio_num Numerator of the sampling rate ratio
+ * @param ratio_den Denominator of the sampling rate ratio
+ * @param in_rate Input sampling rate rounded to the nearest integer (in Hz).
+ * @param out_rate Output sampling rate rounded to the nearest integer (in Hz).
+ */
+int speex_resampler_set_rate_frac(SpeexResamplerState *st,
+                                   spx_uint32_t ratio_num,
+                                   spx_uint32_t ratio_den,
+                                   spx_uint32_t in_rate,
+                                   spx_uint32_t out_rate);
+
+/** Get the current resampling ratio. This will be reduced to the least
+ * common denominator.
+ * @param st Resampler state
+ * @param ratio_num Numerator of the sampling rate ratio copied
+ * @param ratio_den Denominator of the sampling rate ratio copied
+ */
+void speex_resampler_get_ratio(SpeexResamplerState *st,
+                               spx_uint32_t *ratio_num,
+                               spx_uint32_t *ratio_den);
+
+/** Set (change) the conversion quality.
+ * @param st Resampler state
+ * @param quality Resampling quality between 0 and 10, where 0 has poor
+ * quality and 10 has very high quality.
+ */
+int speex_resampler_set_quality(SpeexResamplerState *st,
+                                 int quality);
+
+/** Get the conversion quality.
+ * @param st Resampler state
+ * @param quality Resampling quality between 0 and 10, where 0 has poor
+ * quality and 10 has very high quality.
+ */
+void speex_resampler_get_quality(SpeexResamplerState *st,
+                                 int *quality);
+
+/** Set (change) the input stride.
+ * @param st Resampler state
+ * @param stride Input stride
+ */
+void speex_resampler_set_input_stride(SpeexResamplerState *st,
+                                      spx_uint32_t stride);
+
+/** Get the input stride.
+ * @param st Resampler state
+ * @param stride Input stride copied
+ */
+void speex_resampler_get_input_stride(SpeexResamplerState *st,
+                                      spx_uint32_t *stride);
+
+/** Set (change) the output stride.
+ * @param st Resampler state
+ * @param stride Output stride
+ */
+void speex_resampler_set_output_stride(SpeexResamplerState *st,
+                                      spx_uint32_t stride);
+
+/** Get the output stride.
+ * @param st Resampler state copied
+ * @param stride Output stride
+ */
+void speex_resampler_get_output_stride(SpeexResamplerState *st,
+                                      spx_uint32_t *stride);
+
+/** Get the latency introduced by the resampler measured in input samples.
+ * @param st Resampler state
+ */
+int speex_resampler_get_input_latency(SpeexResamplerState *st);
+
+/** Get the latency introduced by the resampler measured in output samples.
+ * @param st Resampler state
+ */
+int speex_resampler_get_output_latency(SpeexResamplerState *st);
+
+/** Make sure that the first samples to go out of the resamplers don't have
+ * leading zeros. This is only useful before starting to use a newly created
+ * resampler. It is recommended to use that when resampling an audio file, as
+ * it will generate a file with the same length. For real-time processing,
+ * it is probably easier not to use this call (so that the output duration
+ * is the same for the first frame).
+ * @param st Resampler state
+ */
+int speex_resampler_skip_zeros(SpeexResamplerState *st);
+
+/** Reset a resampler so a new (unrelated) stream can be processed.
+ * @param st Resampler state
+ */
+int speex_resampler_reset_mem(SpeexResamplerState *st);
+
+/** Returns the English meaning for an error code
+ * @param err Error code
+ * @return English string
+ */
+const char *speex_resampler_strerror(int err);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+/* Copyright (c) 2004-2012 LoRd_MuldeR <mulder2@gmx.de>
+   File: unicode_support.c
+
+   This file was originally part of a patch included with LameXP,
+   released under the same license as the original audio tools.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+#include "unicode_support.h"
+
+#if defined WIN32 || defined _WIN32 || defined WIN64 || defined _WIN64
+
+
+#include <windows.h>
+#include <io.h>
+#include <stdlib.h>
+
+static wchar_t *utf8_to_utf16(const char *input)
+{
+	wchar_t *Buffer;
+	int BuffSize = 0, Result = 0;
+
+	BuffSize = MultiByteToWideChar(CP_UTF8, 0, input, -1, NULL, 0);
+	Buffer = (wchar_t*) malloc(sizeof(wchar_t) * BuffSize);
+	if(Buffer)
+	{
+		Result = MultiByteToWideChar(CP_UTF8, 0, input, -1, Buffer, BuffSize);
+	}
+
+	return ((Result > 0) && (Result <= BuffSize)) ? Buffer : NULL;
+}
+
+FILE *opeint_fopen(const char *filename_utf8, const char *mode_utf8)
+{
+	FILE *ret = NULL;
+	wchar_t *filename_utf16 = utf8_to_utf16(filename_utf8);
+	wchar_t *mode_utf16 = utf8_to_utf16(mode_utf8);
+	
+	if(filename_utf16 && mode_utf16)
+	{
+		ret = _wfopen(filename_utf16, mode_utf16);
+	}
+
+	if(filename_utf16) free(filename_utf16);
+	if(mode_utf16) free(mode_utf16);
+
+	return ret;
+}
+
+#else
+
+#include <stdio.h>
+
+FILE *opeint_fopen(const char *filename_utf8, const char *mode_utf8) {
+  return fopen(filename_utf8, mode_utf8);
+}
+
+#endif
+/* Copyright (c) 2004-2012 LoRd_MuldeR <mulder2@gmx.de>
+   File: unicode_support.h
+
+   This file was originally part of a patch included with LameXP,
+   released under the same license as the original audio tools.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+#ifndef UNICODE_SUPPORT_H_INCLUDED
+#define UNICODE_SUPPORT_H_INCLUDED
+
+#include <stdio.h>
+
+#define WIN_UNICODE 1
+
+FILE *opeint_fopen(const char *filename_utf8, const char *mode_utf8);
+
+#endif
+/* config.h.  Generated from config.h.in by configure.  */
+/* config.h.in.  Generated from configure.ac by autoheader.  */
+
+/* Define to 1 if you have the <dlfcn.h> header file. */
+#define HAVE_DLFCN_H 1
+
+/* Define to 1 if you have the <inttypes.h> header file. */
+#define HAVE_INTTYPES_H 1
+
+/* Define to 1 if you have the <minix/config.h> header file. */
+/* #undef HAVE_MINIX_CONFIG_H */
+
+/* Define to 1 if you have the <stdint.h> header file. */
+#define HAVE_STDINT_H 1
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#define HAVE_STDIO_H 1
+
+/* Define to 1 if you have the <stdlib.h> header file. */
+#define HAVE_STDLIB_H 1
+
+/* Define to 1 if you have the <strings.h> header file. */
+#define HAVE_STRINGS_H 1
+
+/* Define to 1 if you have the <string.h> header file. */
+#define HAVE_STRING_H 1
+
+/* Define to 1 if you have the <sys/stat.h> header file. */
+#define HAVE_SYS_STAT_H 1
+
+/* Define to 1 if you have the <sys/types.h> header file. */
+#define HAVE_SYS_TYPES_H 1
+
+/* Define to 1 if you have the <unistd.h> header file. */
+#define HAVE_UNISTD_H 1
+
+/* Define to 1 if you have the <wchar.h> header file. */
+#define HAVE_WCHAR_H 1
+
+/* Define to the sub-directory where libtool stores uninstalled libraries. */
+#define LT_OBJDIR ".libs/"
+
+/* This is a build of libopusenc */
+#define OPE_BUILD /**/
+
+/* Enable assertions in code */
+/* #undef OP_ENABLE_ASSERTIONS */
+
+/* Enable fixed-point calculation */
+/* #undef OP_FIXED_POINT */
+
+/* Enable use of lrintf function */
+#define OP_HAVE_LRINTF 1
+
+/* Define to the address where bug reports for this package should be sent. */
+#define PACKAGE_BUGREPORT "opus@xiph.org"
+
+/* Define to the full name of this package. */
+#define PACKAGE_NAME "libopusenc"
+
+/* Define to the full name and version of this package. */
+#define PACKAGE_STRING "libopusenc 0.2.1-16-ge4285b5-dirty"
+
+/* Define to the one symbol short name of this package. */
+#define PACKAGE_TARNAME "libopusenc"
+
+/* Define to the home page for this package. */
+#define PACKAGE_URL ""
+
+/* Define to the version of this package. */
+#define PACKAGE_VERSION "0.2.1-16-ge4285b5-dirty"
+
+/* Faster, takes more memory */
+#define RESAMPLE_FULL_SINC_TABLE 1
+
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
+#define STDC_HEADERS 1
+
+/* Define this if the compiler supports __attribute__((
+   ifelse([visibility("default")], , [visibility_default],
+   [visibility("default")]) )) */
+#define SUPPORT_ATTRIBUTE_VISIBILITY_DEFAULT 1
+
+/* Define this if the compiler supports the -fvisibility flag */
+#define SUPPORT_FLAG_VISIBILITY 1
+
+/* Enable extensions on AIX 3, Interix.  */
+#ifndef _ALL_SOURCE
+# define _ALL_SOURCE 1
+#endif
+/* Enable general extensions on macOS.  */
+#ifndef _DARWIN_C_SOURCE
+# define _DARWIN_C_SOURCE 1
+#endif
+/* Enable general extensions on Solaris.  */
+#ifndef __EXTENSIONS__
+# define __EXTENSIONS__ 1
+#endif
+/* Enable GNU extensions on systems that have them.  */
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE 1
+#endif
+/* Enable X/Open compliant socket functions that do not require linking
+   with -lxnet on HP-UX 11.11.  */
+#ifndef _HPUX_ALT_XOPEN_SOCKET_API
+# define _HPUX_ALT_XOPEN_SOCKET_API 1
+#endif
+/* Identify the host operating system as Minix.
+   This macro does not affect the system headers' behavior.
+   A future release of Autoconf may stop defining this macro.  */
+#ifndef _MINIX
+/* # undef _MINIX */
+#endif
+/* Enable general extensions on NetBSD.
+   Enable NetBSD compatibility extensions on Minix.  */
+#ifndef _NETBSD_SOURCE
+# define _NETBSD_SOURCE 1
+#endif
+/* Enable OpenBSD compatibility extensions on NetBSD.
+   Oddly enough, this does nothing on OpenBSD.  */
+#ifndef _OPENBSD_SOURCE
+# define _OPENBSD_SOURCE 1
+#endif
+/* Define to 1 if needed for POSIX-compatible behavior.  */
+#ifndef _POSIX_SOURCE
+/* # undef _POSIX_SOURCE */
+#endif
+/* Define to 2 if needed for POSIX-compatible behavior.  */
+#ifndef _POSIX_1_SOURCE
+/* # undef _POSIX_1_SOURCE */
+#endif
+/* Enable POSIX-compatible threading on Solaris.  */
+#ifndef _POSIX_PTHREAD_SEMANTICS
+# define _POSIX_PTHREAD_SEMANTICS 1
+#endif
+/* Enable extensions specified by ISO/IEC TS 18661-5:2014.  */
+#ifndef __STDC_WANT_IEC_60559_ATTRIBS_EXT__
+# define __STDC_WANT_IEC_60559_ATTRIBS_EXT__ 1
+#endif
+/* Enable extensions specified by ISO/IEC TS 18661-1:2014.  */
+#ifndef __STDC_WANT_IEC_60559_BFP_EXT__
+# define __STDC_WANT_IEC_60559_BFP_EXT__ 1
+#endif
+/* Enable extensions specified by ISO/IEC TS 18661-2:2015.  */
+#ifndef __STDC_WANT_IEC_60559_DFP_EXT__
+# define __STDC_WANT_IEC_60559_DFP_EXT__ 1
+#endif
+/* Enable extensions specified by ISO/IEC TS 18661-4:2015.  */
+#ifndef __STDC_WANT_IEC_60559_FUNCS_EXT__
+# define __STDC_WANT_IEC_60559_FUNCS_EXT__ 1
+#endif
+/* Enable extensions specified by ISO/IEC TS 18661-3:2015.  */
+#ifndef __STDC_WANT_IEC_60559_TYPES_EXT__
+# define __STDC_WANT_IEC_60559_TYPES_EXT__ 1
+#endif
+/* Enable extensions specified by ISO/IEC TR 24731-2:2010.  */
+#ifndef __STDC_WANT_LIB_EXT2__
+# define __STDC_WANT_LIB_EXT2__ 1
+#endif
+/* Enable extensions specified by ISO/IEC 24747:2009.  */
+#ifndef __STDC_WANT_MATH_SPEC_FUNCS__
+# define __STDC_WANT_MATH_SPEC_FUNCS__ 1
+#endif
+/* Enable extensions on HP NonStop.  */
+#ifndef _TANDEM_SOURCE
+# define _TANDEM_SOURCE 1
+#endif
+/* Enable X/Open extensions.  Define to 500 only if necessary
+   to make mbstate_t available.  */
+#ifndef _XOPEN_SOURCE
+/* # undef _XOPEN_SOURCE */
+#endif
+
+
+/* Number of bits in a file offset, on hosts where this is settable. */
+/* #undef _FILE_OFFSET_BITS */
+
+/* Define for large files, on AIX-style hosts. */
+/* #undef _LARGE_FILES */
+
+/* We need at least WindowsXP for getaddrinfo/freeaddrinfo */
+/* #undef _WIN32_WINNT */
+
+/* Define to `__inline__' or `__inline' if that's what the C compiler
+   calls it, or to nothing if 'inline' is not supported under any name.  */
+#ifndef __cplusplus
+/* #undef inline */
+#endif
