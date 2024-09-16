@@ -803,7 +803,7 @@ int ope_encoder_write(OggOpusEnc *enc, const opus_int16 *pcm, int samples_per_ch
   } while (samples_per_channel > 0);
   return OPE_OK;
 }
-
+//hello
 /* Get the next page from the stream. Returns 1 if there is a page available, 0 if not. */
 int ope_encoder_get_page(OggOpusEnc *enc, unsigned char **page, opus_int32 *len, int flush) {
   if (enc->unrecoverable) return enc->unrecoverable;
